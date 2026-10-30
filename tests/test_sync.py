@@ -295,6 +295,35 @@ class SyncTest(unittest.TestCase):
     self.sync()
     self.assertEqual(self.remote_files(), {"a.txt"})
 
+  def test_ignore_patterns_skip_folders_on_both_sides(self):
+    self.write_local("keep/a.txt", "a")
+    self.write_local("site/.fetch-cache/x.bin", "x")
+    self.write_local("site/assets/logo.png", "png")
+    self.write_local("other/assets/b.txt", "b")
+    os.makedirs(self.remote_path("junk/.fetch-cache"))
+    with open(os.path.join(self.remote_path("junk/.fetch-cache"), "y.bin"), "w") as handle:
+      handle.write("y")
+    self.sync(ignore=".fetch-cache, site/assets")
+    self.assertEqual(self.remote_files(), {"keep/a.txt", "other/assets/b.txt", "junk/.fetch-cache/y.bin"})
+    self.assertFalse(os.path.exists(os.path.join(self.local, "junk", ".fetch-cache", "y.bin")))
+
+  def test_newly_ignored_folder_is_not_trashed(self):
+    self.write_local("a.txt", "a")
+    self.write_local("cache/b.txt", "b")
+    self.sync(ignore="")
+    result = self.sync(ignore="cache")
+    self.assertEqual(result["done"]["trashedLocal"] + result["done"]["trashedRemote"], 0)
+    self.assertIn("cache/b.txt", self.remote_files())
+    self.assertTrue(os.path.exists(os.path.join(self.local, "cache", "b.txt")))
+
+  def test_activity_is_logged_and_can_be_cleared(self):
+    self.write_local("a.txt", "a")
+    self.sync()
+    self.assertEqual([r["path"] for r in pdrive.read_activity(12) if r["kind"] == "uploaded"], ["a.txt"])
+    with self.assertRaises(SystemExit):
+      pdrive.command_clear_activity(None)
+    self.assertEqual(pdrive.read_activity(12), [])
+
   def test_dry_run_changes_nothing(self):
     self.write_local("a.txt", "a")
     self.sync()

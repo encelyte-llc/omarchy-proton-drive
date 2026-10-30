@@ -26,6 +26,7 @@ Item {
   readonly property bool authenticated: status.authenticated === true
   readonly property bool syncEnabled: _desired === -1 ? status.syncEnabled === true : _desired === 1
   readonly property bool syncing: syncProcess.running
+  property string syncStartedAt: ""
   readonly property bool loggingIn: loginProcess.running
   readonly property bool installing: installProcess.running
   readonly property bool busy: syncProcess.running || loginProcess.running || installProcess.running || actionProcess.running
@@ -36,6 +37,7 @@ Item {
   readonly property int syncIntervalMin: intSetting("syncIntervalMin", 10, 2, 1440)
   readonly property string localFolder: Model.expandHome(String(setting("localFolder", "~/ProtonDrive") || "~/ProtonDrive"), home)
   readonly property string remoteFolder: Model.normalizeRemote(setting("remoteFolder", "/my-files/Omarchy") || "/my-files/Omarchy")
+  readonly property string ignore: String(setting("ignore", "node_modules, __pycache__, .venv, .cache, .fetch-cache"))
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -68,7 +70,7 @@ Item {
   function syncNow(allowMassDelete) {
     if (!installed || !authenticated || syncProcess.running) return
     lastError = ""
-    var command = ["python3", helperPath, "sync", "--local", localFolder, "--remote", remoteFolder]
+    var command = ["python3", helperPath, "sync", "--local", localFolder, "--remote", remoteFolder, "--ignore", ignore]
     if (allowMassDelete === true) command.push("--allow-mass-delete")
     syncProcess.command = command
     syncProcess.running = true
@@ -112,6 +114,14 @@ Item {
     lastError = ""
     actionStatus = "Downloading Proton's official CLI…"
     installProcess.running = true
+  }
+
+  function clearActivity() {
+    if (actionProcess.running) return
+    var next = Object.assign({}, status)
+    next.activity = []
+    status = next
+    runAction(["python3", helperPath, "clear-activity"], "")
   }
 
   function runAction(command, successText) {
@@ -196,10 +206,32 @@ Item {
   }
 
   Timer {
+    // While a sync runs, pick up its activity as it is written. Only the
+    // activity log is read; the full status call talks to Proton.
+    interval: 4000
+    repeat: true
+    running: root.syncing
+    onTriggered: if (!activityProcess.running) activityProcess.running = true
+  }
+
+  Timer {
     id: actionStatusTimer
     interval: 2600
     repeat: false
     onTriggered: root.actionStatus = ""
+  }
+
+  Process {
+    id: activityProcess
+    command: ["python3", root.helperPath, "activity", "--limit", "12"]
+    stdout: StdioCollector { id: activityOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      var result = Model.parseJson(activityOut.text)
+      if (exitCode !== 0 || !result || !result.activity) return
+      var next = Object.assign({}, root.status)
+      next.activity = result.activity
+      root.status = next
+    }
   }
 
   Process {
@@ -216,6 +248,7 @@ Item {
     id: syncProcess
     command: []
     stdout: StdioCollector { id: syncOut; waitForEnd: true }
+    onRunningChanged: if (running) root.syncStartedAt = new Date().toISOString()
     onExited: function(exitCode) {
       root.applySync(syncOut.text, exitCode)
       root.refresh()

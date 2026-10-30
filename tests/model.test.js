@@ -33,6 +33,12 @@ test("formatting", () => {
   assert.strictEqual(Model.relativeTime("", NOW), "never")
 })
 
+test("syncingText shows when the current run started", () => {
+  assert.strictEqual(Model.syncingText("2026-10-30T11:53:00Z", NOW), "Started 7m ago")
+  assert.strictEqual(Model.syncingText("2026-10-30T11:59:50Z", NOW), "Started just now")
+  assert.strictEqual(Model.syncingText("", NOW), "In progress")
+})
+
 test("lastSyncText summarizes the run", () => {
   const last = { finished: "2026-10-30T11:55:00Z", ok: true, done: { uploaded: 2, downloaded: 1, conflicts: 1 } }
   assert.strictEqual(Model.lastSyncText(last, NOW), "5m ago · 3 files · 1 conflict")

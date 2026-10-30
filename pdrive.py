@@ -11,6 +11,7 @@ only ever parses JSON.
   pdrive.py set-sync on|off             persist the sync switch
   pdrive.py sync --local DIR --remote PATH [--dry-run] [--allow-mass-delete]
   pdrive.py activity [--limit N]        recent sync activity
+  pdrive.py clear-activity              empty the recent activity list
 
 Safety rules of the sync, in order of importance:
   * nothing is ever deleted permanently: deletions go to the local desktop
@@ -24,6 +25,7 @@ Safety rules of the sync, in order of importance:
 import argparse
 import concurrent.futures
 import fcntl
+import fnmatch
 import hashlib
 import json
 import os
@@ -33,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -44,6 +47,9 @@ STAGING_DIR = ".pdsync-staging"
 IGNORED_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini", ".directory", STAGING_DIR}
 IGNORED_SUFFIXES = ("~", ".part", ".crdownload", ".tmp", ".swp", ".swx")
 IGNORED_PREFIXES = (".~lock.", ".goutputstream-", "~$")
+# Folders that are rebuilt by tools and rarely worth syncing; overridable
+# with --ignore (the "ignore" setting in the panel).
+DEFAULT_IGNORE = "node_modules, __pycache__, .venv, .cache, .fetch-cache"
 ACTIVITY_LIMIT = 200
 LIST_WORKERS = 4
 TRANSFER_WORKERS = 2
@@ -130,12 +136,26 @@ def rel_parent(rel):
   return rel.rsplit("/", 1)[0] if "/" in rel else ""
 
 
-def ignored(name):
+def parse_ignore(text):
+  """Comma or newline separated patterns. A bare name ("node_modules") matches
+  at any depth; one with a slash ("site/assets") matches that path from the
+  sync root. Shell wildcards work in both."""
+  return [p.strip().strip("/") for p in re.split(r"[,\n]", text or "") if p.strip().strip("/")]
+
+
+def ignored(name, rel="", patterns=()):
   return (
     name in IGNORED_NAMES
     or name.endswith(IGNORED_SUFFIXES)
     or name.startswith(IGNORED_PREFIXES)
+    or any(fnmatch.fnmatchcase(rel if "/" in p else name, p) for p in patterns)
   )
+
+
+def ignored_rel(rel, patterns):
+  """True when the path or any folder above it is ignored."""
+  parts = rel.split("/")
+  return any(ignored(parts[i], "/".join(parts[: i + 1]), patterns) for i in range(len(parts)))
 
 
 def sha1_of(path):
@@ -181,7 +201,19 @@ class Cli:
     except OSError as error:
       raise SyncError(f"Could not run proton-drive: {error}")
     if done.returncode != 0:
-      message = (done.stderr or done.stdout or "").strip().splitlines()
+      # The CLI may put the banner on stderr and the message on stdout.
+      output = "\n".join(part.strip() for part in (done.stdout, done.stderr) if part and part.strip())
+      try:
+        with open(state_dir() / "cli-errors.log", "a", encoding="utf-8") as handle:
+          handle.write(f"[{now_iso()}] proton-drive {' '.join(args)} (exit {done.returncode})\n{output}\n\n")
+      except OSError:
+        pass
+      # The CLI frames errors in a banner of "=====" rules and an "Error
+      # details:" label; keep only lines that actually say something.
+      message = [
+        line.strip() for line in output.splitlines()
+        if line.strip().strip("=-*_ ") and line.strip().rstrip(":").lower() != "error details"
+      ]
       raise SyncError(message[-1] if message else f"proton-drive {' '.join(args[:2])} failed")
     if not json_output:
       return done.stdout
@@ -226,7 +258,7 @@ class Cli:
 # Scanning
 
 
-def scan_local(root):
+def scan_local(root, patterns=()):
   files = {}
   dirs = set()
   skipped = []
@@ -236,7 +268,7 @@ def scan_local(root):
     keep = []
     for name in subdirs:
       full = os.path.join(current, name)
-      if ignored(name) or os.path.islink(full):
+      if ignored(name, (rel_dir + "/" + name).lstrip("/"), patterns) or os.path.islink(full):
         continue
       if "\\" in name:
         skipped.append((rel_dir + "/" + name).lstrip("/"))
@@ -247,7 +279,7 @@ def scan_local(root):
     for name in names:
       full = os.path.join(current, name)
       rel = (rel_dir + "/" + name).lstrip("/")
-      if ignored(name) or os.path.islink(full):
+      if ignored(name, rel, patterns) or os.path.islink(full):
         continue
       if "\\" in name:
         skipped.append(rel)
@@ -271,7 +303,7 @@ def remote_entry(node):
   }
 
 
-def scan_remote(cli, root):
+def scan_remote(cli, root, patterns=()):
   """Recursively lists the remote tree. Any listing failure raises."""
   files = {}
   dirs = set()
@@ -293,7 +325,7 @@ def scan_remote(cli, root):
           if not name or "/" in name or "\\" in name or name in (".", ".."):
             skipped.append(rel)
             continue
-          if ignored(name):
+          if ignored(name, rel, patterns):
             continue
           kind = node.get("type")
           if kind == "folder":
@@ -509,21 +541,24 @@ class Syncer:
     return landed
 
 
-def run_sync(local_root, remote_root, dry_run=False, allow_mass_delete=False):
+def run_sync(local_root, remote_root, dry_run=False, allow_mass_delete=False, ignore=DEFAULT_IGNORE):
   with open(state_dir() / "sync.lock", "w") as lock_handle:
     try:
       fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
       raise SyncError("A sync is already running")
-    return _run_sync(local_root, remote_root, dry_run, allow_mass_delete)
+    return _run_sync(local_root, remote_root, dry_run, allow_mass_delete, parse_ignore(ignore))
 
 
-def _run_sync(local_root, remote_root, dry_run, allow_mass_delete):
+def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
   sdir = state_dir()
-  activity = []
+  activity_lock = threading.Lock()
 
+  # Written as it happens (not at the end) so the panel can show progress
+  # during a long sync. Transfers log from worker threads, hence the lock.
   def log(kind, rel, detail=""):
-    activity.append({"time": now_iso(), "kind": kind, "path": rel, "detail": detail})
+    with activity_lock:
+      append_activity([{"time": now_iso(), "kind": kind, "path": rel, "detail": detail}])
 
   local_root = expand_local(local_root)
   remote_root = normalize_remote(remote_root)
@@ -540,8 +575,10 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete):
     or saved.get("remote") != remote_root
   ):
     saved = {"version": STATE_VERSION, "local": local_root, "remote": remote_root, "files": {}, "dirs": []}
-  state = saved.get("files") or {}
-  state_dirs = set(saved.get("dirs") or [])
+  # Ignored paths drop out of the state too, so newly ignoring a folder never
+  # reads as it having been deleted on both sides.
+  state = {rel: v for rel, v in (saved.get("files") or {}).items() if not ignored_rel(rel, patterns)}
+  state_dirs = {rel for rel in saved.get("dirs") or [] if not ignored_rel(rel, patterns)}
 
   first_run = not state
   if not os.path.isdir(local_root):
@@ -554,8 +591,8 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete):
   if first_run and not dry_run:
     ensure_remote_folder(cli, remote_root)
 
-  local, local_dirs, local_skipped = scan_local(local_root)
-  remote, remote_dirs, remote_skipped = scan_remote(cli, remote_root)
+  local, local_dirs, local_skipped = scan_local(local_root, patterns)
+  remote, remote_dirs, remote_skipped = scan_remote(cli, remote_root, patterns)
   for rel in local_skipped + remote_skipped:
     log("skipped", rel, "name cannot be represented on the other side")
 
@@ -692,7 +729,7 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete):
         st = os.stat(syncer.local(rel))
         new_state[rel] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "rev": fresh[rel]["rev"], "sha1": fresh[rel].get("sha1")}
 
-  final_local, final_local_dirs, _ = scan_local(local_root)
+  final_local, final_local_dirs, _ = scan_local(local_root, patterns)
   failed_dirs = {e.split(": ", 1)[0] for e in syncer.errors}
   both_sides = {d for d in remote_dirs if not under(d, trashed_remote)} | (set(needs_remote) - failed_dirs)
   saved_dirs = sorted(final_local_dirs & both_sides)
@@ -703,7 +740,6 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete):
     "files": {rel: entry for rel, entry in new_state.items() if rel in final_local},
     "dirs": saved_dirs,
   })
-  append_activity(activity)
   return {"dryRun": False, "done": syncer.done, "errors": syncer.errors, "files": len(final_local)}
 
 
@@ -821,7 +857,7 @@ def command_set_sync(args):
 def command_sync(args):
   started = now_iso()
   try:
-    result = run_sync(args.local, args.remote, dry_run=args.dry_run, allow_mass_delete=args.allow_mass_delete)
+    result = run_sync(args.local, args.remote, dry_run=args.dry_run, allow_mass_delete=args.allow_mass_delete, ignore=args.ignore)
   except SyncError as error:
     record = {"ok": False, "started": started, "finished": now_iso(), "error": str(error)}
     if str(error) != "A sync is already running":
@@ -896,6 +932,11 @@ def command_activity(args):
   emit({"ok": True, "activity": read_activity(args.limit)})
 
 
+def command_clear_activity(args):
+  (state_dir() / "activity.jsonl").write_text("", encoding="utf-8")
+  emit({"ok": True})
+
+
 def main():
   parser = argparse.ArgumentParser(prog="pdrive.py")
   sub = parser.add_subparsers(dest="command", required=True)
@@ -913,10 +954,13 @@ def main():
   sync.add_argument("--remote", required=True)
   sync.add_argument("--dry-run", action="store_true")
   sync.add_argument("--allow-mass-delete", action="store_true")
+  sync.add_argument("--ignore", default=DEFAULT_IGNORE)
   sync.set_defaults(func=command_sync)
   activity = sub.add_parser("activity")
   activity.add_argument("--limit", type=int, default=12)
   activity.set_defaults(func=command_activity)
+  clear = sub.add_parser("clear-activity")
+  clear.set_defaults(func=command_clear_activity)
   args = parser.parse_args()
   args.func(args)
 

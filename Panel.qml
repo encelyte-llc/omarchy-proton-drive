@@ -39,7 +39,8 @@ Panel {
     ]
     if (!drive.authenticated) return [{ key: "login", glyph: "󰌆", title: "Sign in to Proton Drive", detail: "Opens Proton's sign-in page in your browser" }]
     var list = [
-      { key: "sync", glyph: "󰓦", title: drive.syncing ? "Syncing…" : "Sync now", detail: Model.lastSyncText(drive.status.lastSync, root.nowMs) }
+      { key: "sync", glyph: "󰓦", title: root.phase === "syncing" ? "Syncing…" : "Sync now",
+        detail: root.phase === "syncing" ? Model.syncingText(drive.syncStartedAt, root.nowMs) : Model.lastSyncText(drive.status.lastSync, root.nowMs) }
     ]
     if (massDeleteBlocked) list.push({ key: "syncDeletes", glyph: "󰩹", title: "Sync and allow deletions", detail: "Moves the deleted files to the Trash" })
     list.push({ key: "folder", glyph: "󰉋", title: "Open sync folder", detail: drive.localFolder.replace(drive.home, "~") + "  ⇄  " + Model.remoteLabel(drive.remoteFolder) })
@@ -310,10 +311,34 @@ Panel {
             width: parent.width
             spacing: Style.space(10)
 
-            PanelSectionHeader {
-              text: "RECENT ACTIVITY"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
+            RowLayout {
+              width: parent.width
+
+              PanelSectionHeader {
+                text: "RECENT ACTIVITY"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                Layout.fillWidth: true
+              }
+
+              Text {
+                id: clearActivity
+                textFormat: Text.PlainText
+                text: "Clear"
+                color: clearArea.containsMouse ? root.foreground : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                Layout.alignment: Qt.AlignVCenter
+
+                MouseArea {
+                  id: clearArea
+                  anchors.fill: parent
+                  anchors.margins: -Style.space(4)
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: drive.clearActivity()
+                }
+              }
             }
 
             Column {
@@ -365,12 +390,23 @@ Panel {
       spacing: Style.space(10)
 
       Text {
+        id: actionGlyph
+        readonly property bool spinning: actionRow.action.key === "sync" && root.phase === "syncing"
         textFormat: Text.PlainText
         text: actionRow.action.glyph || ""
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.icon
         Layout.alignment: Qt.AlignVCenter
+        onSpinningChanged: if (!spinning) rotation = 0
+
+        RotationAnimator on rotation {
+          running: actionGlyph.spinning && root.opened
+          from: 0
+          to: 360
+          duration: 1400
+          loops: Animation.Infinite
+        }
       }
 
       ColumnLayout {
