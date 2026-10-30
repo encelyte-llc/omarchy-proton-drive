@@ -9,7 +9,9 @@
   `=====` banner rule; full CLI output goes to `cli-errors.log` in the state folder.
 - Recent activity is written as the sync runs and refreshes live in the panel.
 - Clear button for recent activity.
-- While syncing, the sync row spins and shows when the run started.
+- While syncing, the sync row spins and shows what it is doing: scanning Drive
+  (folders and files found so far), then uploading or downloading N of M.
+- Uploads and downloads appear in recent activity as each folder's batch lands.
 - Read-only CLI calls (list, info, size) retry on transient failures: a locked
   CLI cache database, truncated responses and network timeouts. One glitch no
   longer aborts a long sync.

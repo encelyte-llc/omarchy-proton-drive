@@ -342,6 +342,23 @@ class SyncTest(unittest.TestCase):
     self.assertEqual(pdrive.cli_error_message(output), "SQLiteError: database is locked")
     self.assertEqual(pdrive.cli_error_message("Node not found: x"), "Node not found: x")
 
+  def test_progress_is_reported_and_cleared(self):
+    self.write_local("up.txt", "u")
+    os.makedirs(self.remote_path("dir"))
+    with open(self.remote_path("dir/down.txt"), "w") as handle:
+      handle.write("d")
+    seen = []
+    original = pdrive.set_progress
+    pdrive.set_progress = lambda text: (seen.append(text), original(text))
+    try:
+      self.sync()
+    finally:
+      pdrive.set_progress = original
+    self.assertTrue(any(t.startswith("Scanning Drive") for t in seen))
+    self.assertIn("Uploading · 1 of 1", seen)
+    self.assertIn("Downloading · 1 of 1", seen)
+    self.assertEqual(pdrive.read_progress(), "")
+
   def test_dry_run_changes_nothing(self):
     self.write_local("a.txt", "a")
     self.sync()

@@ -37,6 +37,8 @@ test("syncingText shows when the current run started", () => {
   assert.strictEqual(Model.syncingText("2026-10-30T11:53:00Z", NOW), "Started 7m ago")
   assert.strictEqual(Model.syncingText("2026-10-30T11:59:50Z", NOW), "Started just now")
   assert.strictEqual(Model.syncingText("", NOW), "In progress")
+  assert.strictEqual(Model.syncingText("2026-10-30T11:53:00Z", NOW, "Downloading · 12 of 300"), "Downloading · 12 of 300 · started 7m ago")
+  assert.strictEqual(Model.syncingText("", NOW, "Scanning Drive"), "Scanning Drive")
 })
 
 test("lastSyncText summarizes the run", () => {

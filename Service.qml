@@ -230,6 +230,7 @@ Item {
       if (exitCode !== 0 || !result || !result.activity) return
       var next = Object.assign({}, root.status)
       next.activity = result.activity
+      next.progress = result.progress || ""
       root.status = next
     }
   }
