@@ -373,6 +373,7 @@ class SyncTest(unittest.TestCase):
     result = self.sync(dry_run=True)
     self.assertEqual(result["plan"]["upload"], 1)
     self.assertNotIn("b.txt", self.remote_files())
+    self.assertFalse((pdrive.state_dir() / "progress.json").exists())
 
   def test_refuses_whole_drive(self):
     with self.assertRaises(pdrive.SyncError):

@@ -594,7 +594,8 @@ def run_sync(local_root, remote_root, dry_run=False, allow_mass_delete=False, ig
     try:
       return _run_sync(local_root, remote_root, dry_run, allow_mass_delete, parse_ignore(ignore))
     finally:
-      set_progress("")
+      if not dry_run:
+        set_progress("")
 
 
 def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
@@ -639,7 +640,8 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
     ensure_remote_folder(cli, remote_root)
 
   local, local_dirs, local_skipped = scan_local(local_root, patterns)
-  set_progress("Scanning Drive")
+  if not dry_run:
+    set_progress("Scanning Drive")
   remote, remote_dirs, remote_skipped = scan_remote(cli, remote_root, patterns, None if dry_run else set_progress)
   for rel in local_skipped + remote_skipped:
     log("skipped", rel, "name cannot be represented on the other side")
