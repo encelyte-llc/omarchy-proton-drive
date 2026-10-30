@@ -22,6 +22,7 @@ function defaultStatus() {
     syncRunning: false,
     lastSync: {},
     activity: [],
+    progress: "",
     error: ""
   }
 }
@@ -128,10 +129,15 @@ function heroMeta(phaseName, status, nowMs) {
   return last.finished ? "Synced " + relativeTime(last.finished, nowMs) : "Ready to sync"
 }
 
-function syncingText(startedAt, nowMs) {
-  if (!startedAt) return "In progress"
-  var when = relativeTime(startedAt, nowMs)
-  return when === "just now" ? "Started just now" : "Started " + when
+function syncingText(startedAt, nowMs, progress) {
+  var started = ""
+  if (startedAt) {
+    var when = relativeTime(startedAt, nowMs)
+    started = when === "just now" ? "started just now" : "started " + when
+  }
+  if (progress) return started ? progress + " · " + started : progress
+  if (!started) return "In progress"
+  return started.charAt(0).toUpperCase() + started.substring(1)
 }
 
 function lastSyncText(last, nowMs) {

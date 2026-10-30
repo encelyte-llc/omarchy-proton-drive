@@ -335,7 +335,7 @@ def remote_entry(node):
   }
 
 
-def scan_remote(cli, root, patterns=()):
+def scan_remote(cli, root, patterns=(), progress=None):
   """Recursively lists the remote tree. Any listing failure raises."""
   files = {}
   dirs = set()
@@ -368,6 +368,8 @@ def scan_remote(cli, root, patterns=()):
             if media.startswith("application/vnd.proton"):
               continue  # Proton Docs and Sheets cannot be downloaded as files
             files[rel] = remote_entry(node)
+      if progress:
+        progress(f"Scanning Drive · {len(dirs):,} folders, {len(files):,} files")
   return files, dirs, skipped
 
 
@@ -497,8 +499,9 @@ class Syncer:
       except SyncError as error:
         self.fail(rel, error)
 
-  def upload(self, rels):
-    """Uploads files grouped by remote parent folder. Returns rels that succeeded."""
+  def upload(self, rels, on_batch=None):
+    """Uploads files grouped by remote parent folder. Returns rels that succeeded.
+    `on_batch(items)` runs as each folder's batch lands."""
     groups = {}
     for rel in rels:
       groups.setdefault(rel_parent(rel), []).append(rel)
@@ -515,17 +518,21 @@ class Syncer:
         try:
           future.result()
           succeeded.extend(items)
+          if on_batch:
+            on_batch(items)
         except SyncError as error:
           for rel in items:
             self.fail(rel, error)
+        set_progress(f"Uploading · {len(succeeded):,} of {len(rels):,}")
     return succeeded
 
-  def download(self, rels, remote, local_before):
+  def download(self, rels, remote, local_before, on_batch=None):
     """Downloads into a staging folder, then moves each file into place.
 
     A local file that changed while we were downloading is never overwritten:
     the download is kept beside it as a conflict copy instead.
-    Returns {rel: final local rel} for files that landed.
+    Returns {rel: final local rel} for files that landed; `on_batch` gets the
+    same mapping for each folder's batch as it lands.
     """
     staging_root = os.path.join(self.local_root, STAGING_DIR)
     os.makedirs(staging_root, exist_ok=True)
@@ -549,6 +556,7 @@ class Syncer:
           for rel in items:
             self.fail(rel, error)
           continue
+        batch = {}
         for rel in items:
           name = rel.rsplit("/", 1)[-1]
           fetched = os.path.join(target, name)
@@ -568,7 +576,11 @@ class Syncer:
             os.utime(fetched, (mtime, mtime))
           os.replace(fetched, self.local(destination_rel))
           landed[rel] = destination_rel
+          batch[rel] = destination_rel
         shutil.rmtree(target, ignore_errors=True)
+        if on_batch and batch:
+          on_batch(batch)
+        set_progress(f"Downloading · {len(landed):,} of {len(rels):,}")
     shutil.rmtree(staging_root, ignore_errors=True)
     return landed
 
@@ -579,7 +591,10 @@ def run_sync(local_root, remote_root, dry_run=False, allow_mass_delete=False, ig
       fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
       raise SyncError("A sync is already running")
-    return _run_sync(local_root, remote_root, dry_run, allow_mass_delete, parse_ignore(ignore))
+    try:
+      return _run_sync(local_root, remote_root, dry_run, allow_mass_delete, parse_ignore(ignore))
+    finally:
+      set_progress("")
 
 
 def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
@@ -624,7 +639,8 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
     ensure_remote_folder(cli, remote_root)
 
   local, local_dirs, local_skipped = scan_local(local_root, patterns)
-  remote, remote_dirs, remote_skipped = scan_remote(cli, remote_root, patterns)
+  set_progress("Scanning Drive")
+  remote, remote_dirs, remote_skipped = scan_remote(cli, remote_root, patterns, None if dry_run else set_progress)
   for rel in local_skipped + remote_skipped:
     log("skipped", rel, "name cannot be represented on the other side")
 
@@ -688,23 +704,28 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
       log("conflict", rel, f"kept both; Drive version saved as {copy_rel.rsplit('/', 1)[-1]}")
 
   upload_rels = [a["rel"] for a in by_op.get("upload", [])] + conflict_rels + conflict_copies
-  uploaded = syncer.upload(upload_rels) if upload_rels else []
-  for rel in uploaded:
-    if rel in conflict_rels or rel in conflict_copies:
-      continue
-    syncer.done["uploaded"] += 1
-    log("uploaded", rel)
+  def uploaded_batch(items):
+    for rel in items:
+      if rel in conflict_rels or rel in conflict_copies:
+        continue
+      syncer.done["uploaded"] += 1
+      log("uploaded", rel)
+
+  uploaded = syncer.upload(upload_rels, uploaded_batch) if upload_rels else []
 
   download_rels = [a["rel"] for a in by_op.get("download", [])]
-  landed = syncer.download(download_rels, remote, local) if download_rels else {}
-  for rel, final_rel in landed.items():
-    syncer.done["downloaded"] += 1
-    if final_rel != rel:
-      log("conflict", rel, f"changed locally during download; Drive version saved as {final_rel.rsplit('/', 1)[-1]}")
-    else:
-      log("downloaded", rel)
-      st = os.stat(syncer.local(rel))
-      new_state[rel] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "rev": remote[rel]["rev"], "sha1": remote[rel].get("sha1")}
+  def downloaded_batch(batch):
+    for rel, final_rel in batch.items():
+      syncer.done["downloaded"] += 1
+      if final_rel != rel:
+        log("conflict", rel, f"changed locally during download; Drive version saved as {final_rel.rsplit('/', 1)[-1]}")
+      else:
+        log("downloaded", rel)
+        st = os.stat(syncer.local(rel))
+        new_state[rel] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "rev": remote[rel]["rev"], "sha1": remote[rel].get("sha1")}
+
+  if download_rels:
+    syncer.download(download_rels, remote, local, downloaded_batch)
 
   for action in by_op.get("record", []):
     rel = action["rel"]
@@ -775,6 +796,19 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
   return {"dryRun": False, "done": syncer.done, "errors": syncer.errors, "files": len(final_local)}
 
 
+def set_progress(text):
+  """What the running sync is doing right now, for the panel's sync row."""
+  path = state_dir() / "progress.json"
+  if text:
+    write_json(path, {"text": text, "time": now_iso()})
+  elif path.exists():
+    path.unlink()
+
+
+def read_progress():
+  return str(read_json(state_dir() / "progress.json", {}).get("text") or "")
+
+
 def append_activity(entries):
   if not entries:
     return
@@ -835,6 +869,7 @@ def command_status(args):
     "syncRunning": sync_running,
     "lastSync": last,
     "activity": read_activity(args.limit),
+    "progress": read_progress() if sync_running else "",
     "error": "",
   }
   if not binary:
@@ -961,7 +996,7 @@ def command_auth(args):
 
 
 def command_activity(args):
-  emit({"ok": True, "activity": read_activity(args.limit)})
+  emit({"ok": True, "activity": read_activity(args.limit), "progress": read_progress()})
 
 
 def command_clear_activity(args):

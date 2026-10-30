@@ -40,7 +40,7 @@ Panel {
     if (!drive.authenticated) return [{ key: "login", glyph: "󰌆", title: "Sign in to Proton Drive", detail: "Opens Proton's sign-in page in your browser" }]
     var list = [
       { key: "sync", glyph: "󰓦", title: root.phase === "syncing" ? "Syncing…" : "Sync now",
-        detail: root.phase === "syncing" ? Model.syncingText(drive.syncStartedAt, root.nowMs) : Model.lastSyncText(drive.status.lastSync, root.nowMs) }
+        detail: root.phase === "syncing" ? Model.syncingText(drive.syncStartedAt, root.nowMs, drive.status.progress) : Model.lastSyncText(drive.status.lastSync, root.nowMs) }
     ]
     if (massDeleteBlocked) list.push({ key: "syncDeletes", glyph: "󰩹", title: "Sync and allow deletions", detail: "Moves the deleted files to the Trash" })
     list.push({ key: "folder", glyph: "󰉋", title: "Open sync folder", detail: drive.localFolder.replace(drive.home, "~") + "  ⇄  " + Model.remoteLabel(drive.remoteFolder) })
