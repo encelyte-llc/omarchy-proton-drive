@@ -381,6 +381,36 @@ Panel {
       onClicked: root.runAction(actionRow.action.key)
     }
 
+    // Transfer progress along the bottom of the sync row; hidden while the
+    // sync is still scanning and has no total to measure against.
+    Rectangle {
+      id: progressTrack
+      readonly property real fraction: Number(drive.status.progressFraction)
+      visible: actionRow.action.key === "sync" && root.phase === "syncing" && fraction >= 0
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      anchors.bottomMargin: Style.space(3)
+      height: 2
+      radius: 1
+      color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
+
+      Rectangle {
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: parent.width * Math.max(0, Math.min(1, progressTrack.fraction))
+        radius: 1
+        color: root.foreground
+
+        Behavior on width {
+          NumberAnimation { duration: 400; easing.type: Easing.OutCubic }
+        }
+      }
+    }
+
     RowLayout {
       anchors.left: parent.left
       anchors.right: parent.right
