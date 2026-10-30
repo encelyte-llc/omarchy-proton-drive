@@ -53,6 +53,14 @@ DEFAULT_IGNORE = "node_modules, __pycache__, .venv, .cache, .fetch-cache"
 ACTIVITY_LIMIT = 200
 LIST_WORKERS = 4
 TRANSFER_WORKERS = 2
+# Failures worth retrying: parallel CLI processes contending for the CLI's
+# SQLite cache, truncated responses, and network hiccups.
+TRANSIENT_ERRORS = re.compile(
+  r"database is locked|SQLITE_BUSY|JSON Parse error|timed out|socket connection was closed"
+  r"|ECONNRESET|ETIMEDOUT|EAI_AGAIN|fetch failed|Unable to connect|status code 5\d\d",
+  re.IGNORECASE,
+)
+RETRY_DELAYS = (2, 6, 15)
 
 
 class SyncError(Exception):
@@ -186,18 +194,46 @@ def conflict_name(name, stamp):
 # The official CLI
 
 
+def cli_error_message(output):
+  """The CLI frames errors in a banner of "=====" rules, an "Error details:"
+  label and sometimes a source excerpt and stack trace. Prefer the
+  "SomeError: message" line; otherwise the last line that says something."""
+  lines = [
+    line.strip() for line in output.splitlines()
+    if line.strip().strip("=-*_^ ")
+    and line.strip().rstrip(":").lower() != "error details"
+    and not re.match(r"^\d+ \|", line.strip())
+    and not line.strip().startswith("at ")
+  ]
+  named = [line for line in lines if re.match(r"^[A-Za-z]*Error: ", line)]
+  return (named or lines or [""])[-1]
+
+
 class Cli:
   def __init__(self, binary):
     if not binary:
       raise SyncError("The Proton Drive CLI is not installed")
     self.binary = binary
 
-  def run(self, args, json_output=True, timeout=None):
+  def run(self, args, json_output=True, timeout=None, retries=0):
+    """Runs one CLI command. `retries` is only for commands that are safe to
+    repeat (reads); they are retried on transient failures."""
+    for attempt in range(retries + 1):
+      try:
+        return self._run_once(args, json_output, timeout)
+      except SyncError as error:
+        if attempt >= retries or not getattr(error, "transient", False):
+          raise
+        time.sleep(RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)])
+
+  def _run_once(self, args, json_output, timeout):
     command = [self.binary] + list(args) + (["-j"] if json_output else [])
     try:
       done = subprocess.run(command, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
-      raise SyncError(f"proton-drive {' '.join(args[:2])} timed out")
+      error = SyncError(f"proton-drive {' '.join(args[:2])} timed out")
+      error.transient = True
+      raise error
     except OSError as error:
       raise SyncError(f"Could not run proton-drive: {error}")
     if done.returncode != 0:
@@ -208,13 +244,9 @@ class Cli:
           handle.write(f"[{now_iso()}] proton-drive {' '.join(args)} (exit {done.returncode})\n{output}\n\n")
       except OSError:
         pass
-      # The CLI frames errors in a banner of "=====" rules and an "Error
-      # details:" label; keep only lines that actually say something.
-      message = [
-        line.strip() for line in output.splitlines()
-        if line.strip().strip("=-*_ ") and line.strip().rstrip(":").lower() != "error details"
-      ]
-      raise SyncError(message[-1] if message else f"proton-drive {' '.join(args[:2])} failed")
+      error = SyncError(cli_error_message(output) or f"proton-drive {' '.join(args[:2])} failed")
+      error.transient = bool(TRANSIENT_ERRORS.search(output))
+      raise error
     if not json_output:
       return done.stdout
     text = done.stdout.strip()
@@ -226,14 +258,14 @@ class Cli:
       raise SyncError(f"Unexpected output from proton-drive {' '.join(args[:2])}")
 
   def list(self, path):
-    result = self.run(["filesystem", "list", path], timeout=180)
+    result = self.run(["filesystem", "list", path], timeout=180, retries=3)
     return result if isinstance(result, list) else []
 
   def info(self, path):
-    return self.run(["filesystem", "info", path], timeout=120)
+    return self.run(["filesystem", "info", path], timeout=120, retries=3)
 
   def size(self, path):
-    return self.run(["filesystem", "size", path], timeout=300)
+    return self.run(["filesystem", "size", path], timeout=300, retries=2)
 
   def create_folder(self, parent, name):
     self.run(["filesystem", "create-folder", parent, name], json_output=False, timeout=180)

@@ -86,6 +86,14 @@ def main():
     return
   if os.environ.get("FAKE_DRIVE_FAIL") and args[1:2] == [os.environ["FAKE_DRIVE_FAIL"]]:
     fail("simulated failure")
+  flaky = os.environ.get("FAKE_DRIVE_FLAKY")  # "list:2" fails the first 2 lists
+  if flaky and args[1:2] == [flaky.split(":")[0]]:
+    counter = os.path.join(ROOT, "flaky-count")
+    count = int(open(counter).read()) if os.path.exists(counter) else 0
+    if count < int(flaky.split(":")[1]):
+      with open(counter, "w") as handle:
+        handle.write(str(count + 1))
+      fail("SQLiteError: database is locked\nError details:\n{ code: 'SQLITE_BUSY_RECOVERY' }\n" + "=" * 47)
   group, command, rest = args[0], args[1], args[2:]
   assert group == "filesystem", args
   meta = load_meta()
