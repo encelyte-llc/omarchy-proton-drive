@@ -128,6 +128,12 @@ function heroMeta(phaseName, status, nowMs) {
   return last.finished ? "Synced " + relativeTime(last.finished, nowMs) : "Ready to sync"
 }
 
+function syncingText(startedAt, nowMs) {
+  if (!startedAt) return "In progress"
+  var when = relativeTime(startedAt, nowMs)
+  return when === "just now" ? "Started just now" : "Started " + when
+}
+
 function lastSyncText(last, nowMs) {
   if (!last || !last.finished) return "Never"
   var when = relativeTime(last.finished, nowMs)
@@ -206,6 +212,7 @@ if (typeof module !== "undefined") {
     relativeTime: relativeTime,
     heroMeta: heroMeta,
     lastSyncText: lastSyncText,
+    syncingText: syncingText,
     activityGlyph: activityGlyph,
     activityTitle: activityTitle,
     activityMeta: activityMeta,

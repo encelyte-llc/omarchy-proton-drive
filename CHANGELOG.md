@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Ignore setting: leave folders out of the sync by name (`node_modules`) or by
+  path (`site/assets`), with wildcards. Defaults to common build and cache folders.
+  Newly ignored folders are never treated as deleted.
+- Error messages from the CLI now show the actual message instead of its
+  `=====` banner rule; full CLI output goes to `cli-errors.log` in the state folder.
+- Recent activity is written as the sync runs and refreshes live in the panel.
+- Clear button for recent activity.
+- While syncing, the sync row spins and shows when the run started.
+
 ## 0.1.0 (2026-10-30)
 
 First release.

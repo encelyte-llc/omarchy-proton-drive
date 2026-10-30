@@ -22,6 +22,7 @@
     "defaults": {
       "localFolder": "~/ProtonDrive",
       "remoteFolder": "/my-files/Omarchy",
+      "ignore": "node_modules, __pycache__, .venv, .cache, .fetch-cache",
       "syncIntervalMin": 10,
       "refreshIntervalSec": 300
     },
@@ -39,6 +40,13 @@
         "label": "Proton Drive folder",
         "defaultValue": "/my-files/Omarchy",
         "description": "A folder inside My files, e.g. /my-files/Documents. Created if missing."
+      },
+      {
+        "key": "ignore",
+        "type": "string",
+        "label": "Ignore",
+        "defaultValue": "node_modules, __pycache__, .venv, .cache, .fetch-cache",
+        "description": "Comma-separated folders or files to leave out of the sync. A bare name matches anywhere; a path like site/assets matches from the sync folder. Wildcards work."
       },
       {
         "key": "syncIntervalMin",
