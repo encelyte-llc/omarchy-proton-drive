@@ -324,6 +324,24 @@ class SyncTest(unittest.TestCase):
       pdrive.command_clear_activity(None)
     self.assertEqual(pdrive.read_activity(12), [])
 
+  def test_transient_list_failures_are_retried(self):
+    self.write_local("a.txt", "a")
+    os.environ["FAKE_DRIVE_FLAKY"] = "list:2"
+    saved, pdrive.RETRY_DELAYS = pdrive.RETRY_DELAYS, (0,)
+    try:
+      result = self.sync()
+    finally:
+      pdrive.RETRY_DELAYS = saved
+      os.environ.pop("FAKE_DRIVE_FLAKY")
+    self.assertEqual(result["errors"], [])
+    self.assertEqual(self.remote_files(), {"a.txt"})
+
+  def test_cli_error_message_skips_banner_and_stack(self):
+    output = "7 | export class SQLiteCache {\n         ^\nSQLiteError: database is locked\n   at run (bun:sqlite:318:21)\n" \
+      "Error details:\n{ code: 'SQLITE_BUSY_RECOVERY', errno: 261 }\n" + "=" * 47
+    self.assertEqual(pdrive.cli_error_message(output), "SQLiteError: database is locked")
+    self.assertEqual(pdrive.cli_error_message("Node not found: x"), "Node not found: x")
+
   def test_dry_run_changes_nothing(self):
     self.write_local("a.txt", "a")
     self.sync()
