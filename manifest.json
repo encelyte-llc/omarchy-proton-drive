@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.encelyte-llc.proton-drive",
+  "name": "Proton Drive",
+  "version": "0.1.0",
+  "author": "Encelyte",
+  "license": "MIT",
+  "homepage": "https://github.com/encelyte-llc/omarchy-proton-drive",
+  "description": "Proton Drive in the Omarchy bar: two-way sync of a folder through Proton's official CLI, sign-in, storage, and recent sync activity. Unofficial; not affiliated with Proton AG.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Proton Drive",
+    "description": "Two-way sync between a local folder and a Proton Drive folder, with sign-in, storage used, and recent activity.",
+    "category": "Files",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "localFolder": "~/ProtonDrive",
+      "remoteFolder": "/my-files/Omarchy",
+      "syncIntervalMin": 10,
+      "refreshIntervalSec": 300
+    },
+    "schema": [
+      {
+        "key": "localFolder",
+        "type": "path",
+        "label": "Local folder",
+        "defaultValue": "~/ProtonDrive",
+        "description": "The folder on this computer to keep in sync."
+      },
+      {
+        "key": "remoteFolder",
+        "type": "string",
+        "label": "Proton Drive folder",
+        "defaultValue": "/my-files/Omarchy",
+        "description": "A folder inside My files, e.g. /my-files/Documents. Created if missing."
+      },
+      {
+        "key": "syncIntervalMin",
+        "type": "integer",
+        "label": "Sync every (minutes)",
+        "min": 2,
+        "max": 1440,
+        "step": 1,
+        "defaultValue": 10
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Status refresh (seconds)",
+        "min": 60,
+        "max": 3600,
+        "step": 30,
+        "defaultValue": 300
+      }
+    ]
+  }
+}
