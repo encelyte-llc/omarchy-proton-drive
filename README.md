@@ -57,6 +57,8 @@ download them as files.
 
 ## Install
 
+Full walkthrough, troubleshooting and removal: **[docs/INSTALL.md](docs/INSTALL.md)**.
+
 ```bash
 omarchy plugin add https://github.com/encelyte-llc/omarchy-proton-drive --enable
 ```
