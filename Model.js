@@ -23,6 +23,7 @@ function defaultStatus() {
     lastSync: {},
     activity: [],
     progress: "",
+    progressFraction: -1,
     error: ""
   }
 }

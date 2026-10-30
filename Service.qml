@@ -231,6 +231,7 @@ Item {
       var next = Object.assign({}, root.status)
       next.activity = result.activity
       next.progress = result.progress || ""
+      next.progressFraction = typeof result.progressFraction === "number" ? result.progressFraction : -1
       root.status = next
     }
   }

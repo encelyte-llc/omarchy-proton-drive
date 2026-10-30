@@ -523,7 +523,7 @@ class Syncer:
         except SyncError as error:
           for rel in items:
             self.fail(rel, error)
-        set_progress(f"Uploading · {len(succeeded):,} of {len(rels):,}")
+        set_progress("Uploading", len(succeeded), len(rels))
     return succeeded
 
   def download(self, rels, remote, local_before, on_batch=None):
@@ -580,7 +580,7 @@ class Syncer:
         shutil.rmtree(target, ignore_errors=True)
         if on_batch and batch:
           on_batch(batch)
-        set_progress(f"Downloading · {len(landed):,} of {len(rels):,}")
+        set_progress("Downloading", len(landed), len(rels))
     shutil.rmtree(staging_root, ignore_errors=True)
     return landed
 
@@ -796,17 +796,28 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
   return {"dryRun": False, "done": syncer.done, "errors": syncer.errors, "files": len(final_local)}
 
 
-def set_progress(text):
-  """What the running sync is doing right now, for the panel's sync row."""
+def set_progress(text, done=None, total=None):
+  """What the running sync is doing right now, for the panel's sync row.
+  With `done` and `total` the text gets a percentage and the panel a bar."""
   path = state_dir() / "progress.json"
-  if text:
-    write_json(path, {"text": text, "time": now_iso()})
-  elif path.exists():
-    path.unlink()
+  if not text:
+    if path.exists():
+      path.unlink()
+    return
+  fraction = -1
+  if total:
+    fraction = min(1.0, done / total)
+    text = f"{text} · {int(fraction * 100)}% · {done:,} of {total:,}"
+  write_json(path, {"text": text, "fraction": fraction, "time": now_iso()})
 
 
 def read_progress():
-  return str(read_json(state_dir() / "progress.json", {}).get("text") or "")
+  data = read_json(state_dir() / "progress.json", {})
+  fraction = data.get("fraction")
+  return {
+    "progress": str(data.get("text") or ""),
+    "progressFraction": fraction if isinstance(fraction, (int, float)) else -1,
+  }
 
 
 def append_activity(entries):
@@ -869,7 +880,7 @@ def command_status(args):
     "syncRunning": sync_running,
     "lastSync": last,
     "activity": read_activity(args.limit),
-    "progress": read_progress() if sync_running else "",
+    **(read_progress() if sync_running else {"progress": "", "progressFraction": -1}),
     "error": "",
   }
   if not binary:
@@ -996,7 +1007,7 @@ def command_auth(args):
 
 
 def command_activity(args):
-  emit({"ok": True, "activity": read_activity(args.limit), "progress": read_progress()})
+  emit({"ok": True, "activity": read_activity(args.limit), **read_progress()})
 
 
 def command_clear_activity(args):

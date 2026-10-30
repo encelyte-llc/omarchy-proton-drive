@@ -349,15 +349,22 @@ class SyncTest(unittest.TestCase):
       handle.write("d")
     seen = []
     original = pdrive.set_progress
-    pdrive.set_progress = lambda text: (seen.append(text), original(text))
+    pdrive.set_progress = lambda text, *rest: (seen.append(text), original(text, *rest))
     try:
       self.sync()
     finally:
       pdrive.set_progress = original
     self.assertTrue(any(t.startswith("Scanning Drive") for t in seen))
-    self.assertIn("Uploading · 1 of 1", seen)
-    self.assertIn("Downloading · 1 of 1", seen)
-    self.assertEqual(pdrive.read_progress(), "")
+    self.assertIn("Uploading", seen)
+    self.assertIn("Downloading", seen)
+    self.assertEqual(pdrive.read_progress(), {"progress": "", "progressFraction": -1})
+
+  def test_progress_with_total_has_percentage_and_fraction(self):
+    pdrive.set_progress("Downloading", 120, 400)
+    self.assertEqual(pdrive.read_progress(), {"progress": "Downloading · 30% · 120 of 400", "progressFraction": 0.3})
+    pdrive.set_progress("Scanning Drive")
+    self.assertEqual(pdrive.read_progress()["progressFraction"], -1)
+    pdrive.set_progress("")
 
   def test_dry_run_changes_nothing(self):
     self.write_local("a.txt", "a")
