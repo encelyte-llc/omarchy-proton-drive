@@ -43,7 +43,7 @@ Panel {
     if (!drive.authenticated) return [{ key: "login", glyph: "󰌆", title: "Sign in to Proton Drive", detail: "Opens Proton's sign-in page in your browser" }]
     var list = [
       { key: "sync", glyph: "󰓦", title: root.phase === "syncing" ? "Syncing…" : "Sync now",
-        detail: root.phase === "syncing" ? Model.syncingText(drive.syncStartedAt, root.nowMs, drive.status.progress) : Model.lastSyncText(drive.status.lastSync, root.nowMs) }
+        detail: root.phase === "syncing" ? Model.syncingText(drive.status.progressStarted || drive.syncStartedAt, root.nowMs, drive.status.progress) : Model.lastSyncText(drive.status.lastSync, root.nowMs) }
     ]
     if (massDeleteBlocked) list.push({ key: "syncDeletes", glyph: "󰩹", title: "Sync and allow deletions", detail: "Moves the deleted files to the Trash" })
     list.push({ key: "folder", glyph: "󰉋", title: "Open sync folder", detail: drive.localFolder.replace(drive.home, "~") + "  ⇄  " + Model.remoteLabel(drive.remoteFolder) })
@@ -432,6 +432,8 @@ Panel {
         font.pixelSize: Style.font.icon
         horizontalAlignment: Text.AlignHCenter
         Layout.preferredWidth: root.glyphSlot
+        Layout.minimumWidth: root.glyphSlot
+        Layout.maximumWidth: root.glyphSlot
         Layout.alignment: Qt.AlignVCenter
         onSpinningChanged: if (!spinning) rotation = 0
 
@@ -467,7 +469,11 @@ Panel {
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
-          elide: Text.ElideMiddle
+          // Sync progress wraps so the counts and elapsed time stay readable;
+          // paths elide in the middle to keep both ends.
+          wrapMode: actionRow.action.key === "sync" ? Text.WordWrap : Text.NoWrap
+          maximumLineCount: 2
+          elide: actionRow.action.key === "sync" ? Text.ElideRight : Text.ElideMiddle
         }
       }
     }
@@ -506,6 +512,8 @@ Panel {
         font.pixelSize: Style.font.icon
         horizontalAlignment: Text.AlignHCenter
         Layout.preferredWidth: root.glyphSlot
+        Layout.minimumWidth: root.glyphSlot
+        Layout.maximumWidth: root.glyphSlot
         Layout.alignment: Qt.AlignVCenter
       }
 
