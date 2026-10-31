@@ -54,9 +54,11 @@ ACTIVITY_LIMIT = 200
 LIST_WORKERS = 4
 TRANSFER_WORKERS = 2
 # Failures worth retrying: parallel CLI processes contending for the CLI's
-# SQLite cache, truncated responses, and network hiccups.
+# SQLite cache or racing to rotate its log file, truncated responses, and
+# network hiccups.
 TRANSIENT_ERRORS = re.compile(
   r"database is locked|SQLITE_BUSY|JSON Parse error|timed out|socket connection was closed"
+  r"|ENOENT: no such file or directory, (?:rename|unlink) '[^']*proton-drive\.log"
   r"|ECONNRESET|ETIMEDOUT|EAI_AGAIN|fetch failed|Unable to connect|status code 5\d\d",
   re.IGNORECASE,
 )
@@ -196,16 +198,19 @@ def conflict_name(name, stamp):
 
 def cli_error_message(output):
   """The CLI frames errors in a banner of "=====" rules, an "Error details:"
-  label and sometimes a source excerpt and stack trace. Prefer the
-  "SomeError: message" line; otherwise the last line that says something."""
+  label followed by a dump of the error object, and sometimes a source
+  excerpt and stack trace. Prefer the "SomeError: message" (or Node's
+  "ENOENT: message") line; otherwise the last line that says something
+  before the details dump."""
+  head = re.split(r"^\s*Error details:\s*$", output, maxsplit=1, flags=re.MULTILINE | re.IGNORECASE)[0]
   lines = [
-    line.strip() for line in output.splitlines()
+    line.strip() for line in (head if head.strip() else output).splitlines()
     if line.strip().strip("=-*_^ ")
     and line.strip().rstrip(":").lower() != "error details"
     and not re.match(r"^\d+ \|", line.strip())
     and not line.strip().startswith("at ")
   ]
-  named = [line for line in lines if re.match(r"^[A-Za-z]*Error: ", line)]
+  named = [line for line in lines if re.match(r"^(?:[A-Za-z]*Error|E[A-Z]{2,}): ", line)]
   return (named or lines or [""])[-1]
 
 
