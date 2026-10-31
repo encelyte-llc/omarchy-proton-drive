@@ -33,12 +33,13 @@ test("formatting", () => {
   assert.strictEqual(Model.relativeTime("", NOW), "never")
 })
 
-test("syncingText shows when the current run started", () => {
-  assert.strictEqual(Model.syncingText("2026-10-30T11:53:00Z", NOW), "Started 7m ago")
-  assert.strictEqual(Model.syncingText("2026-10-30T11:59:50Z", NOW), "Started just now")
+test("syncingText shows how long the current run has taken", () => {
+  assert.strictEqual(Model.syncingText("2026-10-30T11:53:00Z", NOW), "Started · 7m")
+  assert.strictEqual(Model.syncingText("2026-10-30T11:59:50Z", NOW), "Started · just started")
   assert.strictEqual(Model.syncingText("", NOW), "In progress")
-  assert.strictEqual(Model.syncingText("2026-10-30T11:53:00Z", NOW, "Downloading · 12 of 300"), "Downloading · 12 of 300 · started 7m ago")
-  assert.strictEqual(Model.syncingText("", NOW, "Scanning Drive"), "Scanning Drive")
+  assert.strictEqual(Model.syncingText("2026-10-30T11:53:00Z", NOW, "Downloading · 12 of 300"), "Downloading · 12 of 300 · 7m")
+  assert.strictEqual(Model.syncingText("2026-10-30T10:40:00Z", NOW, "Scanning"), "Scanning · 1h 20m")
+  assert.strictEqual(Model.syncingText("", NOW, "Scanning"), "Scanning")
 })
 
 test("lastSyncText summarizes the run", () => {
@@ -59,7 +60,14 @@ test("activity rows", () => {
   const entry = { kind: "uploaded", path: "docs/report.pdf", time: "2026-10-30T11:00:00Z" }
   assert.strictEqual(Model.activityTitle(entry), "report.pdf")
   assert.strictEqual(Model.activityMeta(entry, NOW), "Uploaded · 1h ago · docs")
-  assert.strictEqual(Model.activityTitle({ kind: "error", path: "", detail: "boom" }), "boom")
+  const failed = { kind: "error", path: "", detail: "boom", time: "2026-10-30T11:00:00Z" }
+  assert.strictEqual(Model.activityTitle(failed), "Sync failed")
+  assert.strictEqual(Model.activityMeta(failed, NOW), "1h ago · boom")
+  const synced = { kind: "synced", path: "", time: "2026-10-30T11:00:00Z", files: 9939, done: {} }
+  assert.strictEqual(Model.activityTitle(synced), "Sync complete")
+  assert.strictEqual(Model.activityMeta(synced, NOW), "1h ago · 9,939 files, all up to date")
+  synced.done = { uploaded: 3, downloaded: 1 }
+  assert.strictEqual(Model.activityMeta(synced, NOW), "1h ago · 3 up, 1 down")
 })
 
 test("extractUrl finds the sign-in link", () => {

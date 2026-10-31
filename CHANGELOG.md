@@ -16,6 +16,17 @@
 - Read-only CLI calls (list, info, size) retry on transient failures: a locked
   CLI cache database, truncated responses and network timeouts. One glitch no
   longer aborts a long sync.
+- Each finished sync adds a "Sync complete" (or "Sync failed") entry to recent
+  activity, so you can tell whether older errors still matter.
+- Automatic sync waits the full interval after the previous sync finishes, so a
+  sync longer than the interval no longer runs back to back.
+- Scanning Drive no longer waits for every folder at one depth before going
+  deeper, so large trees scan faster.
+- The sync row shows how long the current sync has run, even when it was
+  started before the shell reloaded.
+- CLI errors from Node (`ENOENT: …`) show their message instead of `}`, and
+  the CLI's log-rotation race between parallel calls is retried.
+- Action and activity rows line up their text regardless of icon width.
 
 ## 0.1.0 (2026-10-30)
 
