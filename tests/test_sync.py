@@ -342,6 +342,14 @@ class SyncTest(unittest.TestCase):
     self.assertEqual(pdrive.cli_error_message(output), "SQLiteError: database is locked")
     self.assertEqual(pdrive.cli_error_message("Node not found: x"), "Node not found: x")
 
+  def test_cli_error_message_ignores_details_dump(self):
+    message = "ENOENT: no such file or directory, rename '/s/proton-drive.log.3' -> '/s/proton-drive.log.4'"
+    output = "113 |             renameSync(from, to);\n                  ^\n" + message + "\n" \
+      "    path: \"/s/proton-drive.log.3\",\n    code: \"ENOENT\"\n\n      at KEe (src/telemetry/fileHandler.ts:113:13)\n" \
+      "Error details:\n{\n  code: 'ENOENT',\n  errno: -2\n}\n" + "=" * 47
+    self.assertEqual(pdrive.cli_error_message(output), message)
+    self.assertTrue(pdrive.TRANSIENT_ERRORS.search(output))
+
   def test_progress_is_reported_and_cleared(self):
     self.write_local("up.txt", "u")
     os.makedirs(self.remote_path("dir"))

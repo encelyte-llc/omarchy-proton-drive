@@ -24,6 +24,9 @@ Panel {
   readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
   readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
+  // Icon glyphs have uneven advance widths; a fixed slot keeps every row's
+  // text starting at the same x.
+  readonly property int glyphSlot: Math.ceil(Style.font.icon * 1.25)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property string phase: drive.phase
   readonly property bool lit: phase === "idle" || phase === "syncing"
@@ -427,6 +430,8 @@ Panel {
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.icon
+        horizontalAlignment: Text.AlignHCenter
+        Layout.preferredWidth: root.glyphSlot
         Layout.alignment: Qt.AlignVCenter
         onSpinningChanged: if (!spinning) rotation = 0
 
@@ -499,6 +504,8 @@ Panel {
         color: activityRow.entry.kind === "error" ? root.urgent : root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.icon
+        horizontalAlignment: Text.AlignHCenter
+        Layout.preferredWidth: root.glyphSlot
         Layout.alignment: Qt.AlignVCenter
       }
 
