@@ -1,5 +1,8 @@
 """Sync engine tests against the fake CLI. Run: python3 -m unittest discover tests"""
 
+import argparse
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -362,15 +365,35 @@ class SyncTest(unittest.TestCase):
       self.sync()
     finally:
       pdrive.set_progress = original
-    self.assertTrue(any(t.startswith("Scanning Drive") for t in seen))
+    self.assertTrue(any(t.startswith("Scanning · ") for t in seen))
     self.assertIn("Uploading", seen)
     self.assertIn("Downloading", seen)
-    self.assertEqual(pdrive.read_progress(), {"progress": "", "progressFraction": -1})
+    self.assertEqual(pdrive.read_progress(), {"progress": "", "progressFraction": -1, "progressStarted": ""})
+
+  def test_completed_sync_is_logged_to_activity(self):
+    self.write_local("a.txt", "a")
+    args = argparse.Namespace(local=self.local, remote=REMOTE, dry_run=False, allow_mass_delete=False, ignore="")
+    with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+      pdrive.command_sync(args)
+    last = pdrive.read_activity(5)[0]
+    self.assertEqual(last["kind"], "synced")
+    self.assertEqual(last["path"], "")
+    self.assertEqual(last["done"]["uploaded"], 1)
+
+  def test_deep_tree_is_scanned_completely(self):
+    for rel in ("a/b/c/d/deep.txt", "a/side.txt", "x/y.txt", "top.txt"):
+      self.write_local(rel, rel)
+    self.sync()
+    files, dirs, _ = pdrive.scan_remote(pdrive.Cli(pdrive.cli_path()), REMOTE)
+    self.assertEqual(set(files), {"a/b/c/d/deep.txt", "a/side.txt", "x/y.txt", "top.txt"})
+    self.assertEqual(dirs, {"a", "a/b", "a/b/c", "a/b/c/d", "x"})
 
   def test_progress_with_total_has_percentage_and_fraction(self):
     pdrive.set_progress("Downloading", 120, 400)
-    self.assertEqual(pdrive.read_progress(), {"progress": "Downloading · 30% · 120 of 400", "progressFraction": 0.3})
-    pdrive.set_progress("Scanning Drive")
+    progress = pdrive.read_progress()
+    self.assertEqual(progress["progress"], "Downloading · 30% · 120 of 400")
+    self.assertEqual(progress["progressFraction"], 0.3)
+    pdrive.set_progress("Scanning")
     self.assertEqual(pdrive.read_progress()["progressFraction"], -1)
     pdrive.set_progress("")
 

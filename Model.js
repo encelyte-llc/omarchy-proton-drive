@@ -24,6 +24,7 @@ function defaultStatus() {
     activity: [],
     progress: "",
     progressFraction: -1,
+    progressStarted: "",
     error: ""
   }
 }
@@ -130,15 +131,22 @@ function heroMeta(phaseName, status, nowMs) {
   return last.finished ? "Synced " + relativeTime(last.finished, nowMs) : "Ready to sync"
 }
 
+// How long a sync has run: "45s", "9m", "1h 20m".
+function elapsedText(startedAt, nowMs) {
+  var ms = isoToMs(startedAt)
+  if (!ms) return ""
+  var now = nowMs === undefined ? Date.now() : Number(nowMs)
+  var minutes = Math.floor(Math.max(0, now - ms) / 60000)
+  if (minutes < 1) return "just started"
+  if (minutes < 60) return minutes + "m"
+  var hours = Math.floor(minutes / 60)
+  return hours + "h" + (minutes % 60 ? " " + (minutes % 60) + "m" : "")
+}
+
 function syncingText(startedAt, nowMs, progress) {
-  var started = ""
-  if (startedAt) {
-    var when = relativeTime(startedAt, nowMs)
-    started = when === "just now" ? "started just now" : "started " + when
-  }
-  if (progress) return started ? progress + " · " + started : progress
-  if (!started) return "In progress"
-  return started.charAt(0).toUpperCase() + started.substring(1)
+  var elapsed = elapsedText(startedAt, nowMs)
+  if (progress) return elapsed ? progress + " · " + elapsed : progress
+  return elapsed ? "Started · " + elapsed : "In progress"
 }
 
 function lastSyncText(last, nowMs) {
@@ -154,6 +162,7 @@ function lastSyncText(last, nowMs) {
 }
 
 var ACTIVITY = {
+  "synced": { glyph: String.fromCodePoint(0xF0160), verb: "Sync complete" },     // md-cloud-check
   "uploaded": { glyph: String.fromCodePoint(0xF0552), verb: "Uploaded" },       // md-upload
   "downloaded": { glyph: String.fromCodePoint(0xF01DA), verb: "Downloaded" },   // md-download
   "conflict": { glyph: String.fromCodePoint(0xF0A10), verb: "Conflict" },       // md-file-compare
@@ -167,8 +176,25 @@ function activityGlyph(kind) {
   return (ACTIVITY[kind] || ACTIVITY.error).glyph
 }
 
+function syncSummary(entry) {
+  var done = entry && entry.done || {}
+  var parts = []
+  if (Number(done.uploaded || 0) > 0) parts.push(done.uploaded + " up")
+  if (Number(done.downloaded || 0) > 0) parts.push(done.downloaded + " down")
+  if (Number(done.conflicts || 0) > 0) parts.push(done.conflicts + " conflict" + (done.conflicts === 1 ? "" : "s"))
+  var trashed = Number(done.trashedLocal || 0) + Number(done.trashedRemote || 0)
+  if (trashed > 0) parts.push(trashed + " trashed")
+  if (parts.length) return parts.join(", ")
+  var files = Number(entry && entry.files || 0)
+  return files > 0 ? formatCount(files) + " files, all up to date" : "All up to date"
+}
+
 function activityTitle(entry) {
   var path = String(entry && entry.path || "")
+  var kind = entry && entry.kind
+  // Entries without a path describe a whole sync run.
+  if (path === "" && kind === "synced") return "Sync complete"
+  if (path === "" && kind === "error") return "Sync failed"
   if (path === "") return String(entry && entry.detail || "Sync")
   var name = path.split("/").pop()
   return name || path
@@ -176,8 +202,11 @@ function activityTitle(entry) {
 
 function activityMeta(entry, nowMs) {
   var info = ACTIVITY[entry && entry.kind] || ACTIVITY.error
-  var parts = [info.verb, relativeTime(entry && entry.time, nowMs)]
   var path = String(entry && entry.path || "")
+  var when = relativeTime(entry && entry.time, nowMs)
+  if (path === "" && entry && entry.kind === "synced") return when + " · " + syncSummary(entry)
+  if (path === "" && entry && entry.kind === "error") return when + " · " + String(entry.detail || "Unknown error")
+  var parts = [info.verb, when]
   var folder = path.indexOf("/") >= 0 ? path.substring(0, path.lastIndexOf("/")) : ""
   if (folder !== "") parts.push(folder)
   return parts.join(" · ")
@@ -220,6 +249,7 @@ if (typeof module !== "undefined") {
     heroMeta: heroMeta,
     lastSyncText: lastSyncText,
     syncingText: syncingText,
+    elapsedText: elapsedText,
     activityGlyph: activityGlyph,
     activityTitle: activityTitle,
     activityMeta: activityMeta,

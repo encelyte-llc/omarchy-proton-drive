@@ -189,9 +189,12 @@ Item {
 
   Timer {
     id: syncTimer
+    // Not running during a sync, so the interval counts from when the last
+    // sync finished; a sync longer than the interval no longer starts the
+    // next one straight away.
     interval: root.syncIntervalMin * 60 * 1000
     repeat: true
-    running: root.syncEnabled && root.authenticated
+    running: root.syncEnabled && root.authenticated && !root.syncing && !root.status.syncRunning
     onTriggered: root.syncNow(false)
   }
 
@@ -210,7 +213,7 @@ Item {
     // activity log is read; the full status call talks to Proton.
     interval: 4000
     repeat: true
-    running: root.syncing
+    running: root.syncing || root.status.syncRunning
     onTriggered: if (!activityProcess.running) activityProcess.running = true
   }
 
@@ -232,6 +235,10 @@ Item {
       next.activity = result.activity
       next.progress = result.progress || ""
       next.progressFraction = typeof result.progressFraction === "number" ? result.progressFraction : -1
+      next.progressStarted = result.progressStarted || ""
+      // The sync may have been started by another shell session; once its
+      // progress file is gone it has finished.
+      if (!root.syncing && next.syncRunning && next.progress === "") root.refresh()
       root.status = next
     }
   }

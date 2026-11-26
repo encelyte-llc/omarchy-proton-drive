@@ -349,12 +349,14 @@ def scan_remote(cli, root, patterns=(), progress=None):
   def list_dir(rel):
     return rel, cli.list(remote_join(root, rel))
 
-  pending = [""]
+  # A folder is listed as soon as its parent's listing lands, rather than
+  # level by level, so one slow folder never holds up the rest of the tree.
   with concurrent.futures.ThreadPoolExecutor(max_workers=LIST_WORKERS) as pool:
-    while pending:
-      results = list(pool.map(list_dir, pending))
-      pending = []
-      for rel_dir, nodes in results:
+    running = {pool.submit(list_dir, "")}
+    while running:
+      finished, running = concurrent.futures.wait(running, return_when=concurrent.futures.FIRST_COMPLETED)
+      for future in finished:
+        rel_dir, nodes = future.result()
         for node in nodes:
           name_field = node.get("name") or {}
           name = name_field.get("value") if name_field.get("ok") else None
@@ -367,14 +369,14 @@ def scan_remote(cli, root, patterns=(), progress=None):
           kind = node.get("type")
           if kind == "folder":
             dirs.add(rel)
-            pending.append(rel)
+            running.add(pool.submit(list_dir, rel))
           elif kind == "file":
             media = str(node.get("mediaType") or "")
             if media.startswith("application/vnd.proton"):
               continue  # Proton Docs and Sheets cannot be downloaded as files
             files[rel] = remote_entry(node)
       if progress:
-        progress(f"Scanning Drive · {len(dirs):,} folders, {len(files):,} files")
+        progress(f"Scanning · {len(dirs):,} folders, {len(files):,} files")
   return files, dirs, skipped
 
 
@@ -591,11 +593,15 @@ class Syncer:
 
 
 def run_sync(local_root, remote_root, dry_run=False, allow_mass_delete=False, ignore=DEFAULT_IGNORE):
+  global _sync_started
   with open(state_dir() / "sync.lock", "w") as lock_handle:
     try:
       fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
       raise SyncError("A sync is already running")
+    _sync_started = now_iso()
+    if not dry_run:
+      set_progress("Scanning")
     try:
       return _run_sync(local_root, remote_root, dry_run, allow_mass_delete, parse_ignore(ignore))
     finally:
@@ -646,7 +652,7 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
 
   local, local_dirs, local_skipped = scan_local(local_root, patterns)
   if not dry_run:
-    set_progress("Scanning Drive")
+    set_progress("Scanning")
   remote, remote_dirs, remote_skipped = scan_remote(cli, remote_root, patterns, None if dry_run else set_progress)
   for rel in local_skipped + remote_skipped:
     log("skipped", rel, "name cannot be represented on the other side")
@@ -803,6 +809,11 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
   return {"dryRun": False, "done": syncer.done, "errors": syncer.errors, "files": len(final_local)}
 
 
+# When the running sync took the lock. The panel reads it from progress.json,
+# since the sync may have been started by an earlier shell session.
+_sync_started = ""
+
+
 def set_progress(text, done=None, total=None):
   """What the running sync is doing right now, for the panel's sync row.
   With `done` and `total` the text gets a percentage and the panel a bar."""
@@ -815,7 +826,7 @@ def set_progress(text, done=None, total=None):
   if total:
     fraction = min(1.0, done / total)
     text = f"{text} · {int(fraction * 100)}% · {done:,} of {total:,}"
-  write_json(path, {"text": text, "fraction": fraction, "time": now_iso()})
+  write_json(path, {"text": text, "fraction": fraction, "time": now_iso(), "started": _sync_started})
 
 
 def read_progress():
@@ -824,6 +835,7 @@ def read_progress():
   return {
     "progress": str(data.get("text") or ""),
     "progressFraction": fraction if isinstance(fraction, (int, float)) else -1,
+    "progressStarted": str(data.get("started") or ""),
   }
 
 
@@ -848,8 +860,10 @@ def read_activity(limit):
       rows.append(json.loads(line))
     except ValueError:
       continue
+  order = {id(r): i for i, r in enumerate(rows)}
   rows = [r for r in rows if r.get("kind") != "skipped"] + [r for r in rows if r.get("kind") == "skipped"][-3:]
-  rows.sort(key=lambda r: r.get("time", ""), reverse=True)
+  # Newest first; entries written in the same second keep their file order.
+  rows.sort(key=lambda r: (r.get("time", ""), order[id(r)]), reverse=True)
   return rows[:limit]
 
 
@@ -954,6 +968,14 @@ def command_sync(args):
     record["errors"] = record.get("errors", [])[:20]
     record["error"] = record["errors"][0] if record["errors"] else ""
     write_json(state_dir() / "last-sync.json", record)
+    # Marks the end of each sync in the activity list, so older errors read
+    # as history rather than as the current state.
+    count = len(record["errors"])
+    append_activity([{
+      "time": record["finished"], "kind": "synced" if record["ok"] else "error", "path": "",
+      "detail": "" if record["ok"] else f"Finished with {count} error{'s' if count != 1 else ''}: {record['error']}",
+      "done": record.get("done") or {}, "files": record.get("files", 0),
+    }])
   emit(record, 0 if record["ok"] else 1)
 
 
