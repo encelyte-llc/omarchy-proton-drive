@@ -415,13 +415,18 @@ def drive_event_id(cli, remote_root):
   anything on the Drive changes: this plugin's uploads, the web app, the phone.
   One cheap call refreshes it; the file has to be written during that call,
   or the check did not happen and the answer is None."""
-  started = time.time()
-  cli.info(remote_root)
   path = cli_data_dir() / "events.json"
-  try:
-    if path.stat().st_mtime < started:
+  # The CLI skips the write when another of its processes holds the file's
+  # lock (the panel's status refresh, a parallel listing), so try twice.
+  for attempt in range(2):
+    started = time.time()
+    cli.info(remote_root)
+    try:
+      if path.stat().st_mtime >= started:
+        break
+    except OSError:
       return None
-  except OSError:
+  else:
     return None
   drive = (read_json(path, {}) or {}).get("drive") or {}
   ids = sorted(f"{volume}:{entry.get('lastEventId')}" for volume, entry in drive.items()
@@ -460,6 +465,22 @@ def cached_remote_tree(remote_root, patterns, event_id):
   ):
     return None
   return cache.get("files") or {}, set(cache.get("dirs") or []), cache["scannedAt"]
+
+
+def cache_miss_reason(remote_root, patterns, event_id, first_run):
+  """Why the saved tree could not be used, for the sync result and log."""
+  if first_run:
+    return "first sync"
+  if not event_id:
+    return "could not confirm the Drive's latest change"
+  cache = read_json(state_dir() / "remote-cache.json", {})
+  if not cache:
+    return "no saved tree"
+  if cache.get("remote") != remote_root or cache.get("ignore") != list(patterns):
+    return "folder or skip list changed"
+  if cache.get("eventId") != event_id:
+    return "the Drive changed"
+  return "saved tree older than 6 hours"
 
 
 def save_remote_tree(remote_root, patterns, event_id, scanned_at, files, dirs):
@@ -753,6 +774,7 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
   except SyncError:
     event_id = None
   cached = cached_remote_tree(remote_root, patterns, event_id)
+  scan_reason = cache_miss_reason(remote_root, patterns, event_id, first_run) if cached is None else ""
   if cached is not None:
     remote, remote_dirs, scanned_at = cached
     remote_skipped = []
@@ -785,7 +807,7 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
   for action in actions:
     summary[action["op"]] += 1
   if dry_run:
-    return {"dryRun": True, "plan": summary, "deletions": deletions, "actions": actions[:200], "remoteScan": remote_scan}
+    return {"dryRun": True, "plan": summary, "deletions": deletions, "actions": actions[:200], "remoteScan": remote_scan, "scanReason": scan_reason}
 
   syncer = Syncer(cli, local_root, remote_root, log)
   by_op = {}
@@ -842,6 +864,9 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
       syncer.done["uploaded"] += 1
       log("uploaded", rel)
 
+  # A file deleted since the scan is not an upload error: the next sync
+  # sees it gone and, if the Drive has it, trashes it there.
+  upload_rels = [rel for rel in upload_rels if os.path.lexists(syncer.local(rel))]
   uploaded = syncer.upload(upload_rels, uploaded_batch) if upload_rels else []
 
   download_rels = [a["rel"] for a in by_op.get("download", [])]
@@ -944,7 +969,7 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
     except SyncError:
       after_writes = None
     save_remote_tree(remote_root, patterns, after_writes, scanned_at, tree, tree_dirs)
-  return {"dryRun": False, "done": syncer.done, "errors": syncer.errors, "files": len(final_local), "remoteScan": remote_scan}
+  return {"dryRun": False, "done": syncer.done, "errors": syncer.errors, "files": len(final_local), "remoteScan": remote_scan, "scanReason": scan_reason}
 
 
 # When the running sync took the lock. The panel reads it from progress.json,

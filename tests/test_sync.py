@@ -577,6 +577,26 @@ class SyncTest(unittest.TestCase):
       pdrive.drive_event_id = original
     self.assertEqual(self.sync()["remoteScan"], "cached")
 
+  def test_file_gone_before_upload_is_not_an_error(self):
+    self.write_local("a.txt", "a")
+    self.sync()
+    self.write_local("new.txt", "n")
+    original = pdrive.plan_sync
+
+    def plan_then_user_deletes(*args, **kwargs):
+      actions = original(*args, **kwargs)
+      os.remove(os.path.join(self.local, "new.txt"))
+      return actions
+
+    pdrive.plan_sync = plan_then_user_deletes
+    try:
+      result = self.sync()
+    finally:
+      pdrive.plan_sync = original
+    self.assertEqual(result["errors"], [])
+    self.assertNotIn("new.txt", self.remote_files())
+    self.assertEqual(self.sync()["done"]["downloaded"], 0)
+
   def test_syncs_whole_of_my_files(self):
     self.write_local("top.txt", "top")
     pdrive.run_sync(self.local, "/my-files")
