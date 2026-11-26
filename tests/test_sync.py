@@ -452,7 +452,42 @@ class SyncTest(unittest.TestCase):
     result = self.sync()
     self.assertEqual(result["remoteScan"], "cached")
     self.assertEqual(self.read_remote("c.txt"), "c")
+    # Our own upload is folded into the saved tree, so no full scan follows.
+    result = self.sync()
+    self.assertEqual(result["remoteScan"], "cached")
+    self.assertEqual(result["done"]["uploaded"] + result["done"]["downloaded"], 0)
+
+  def test_others_change_before_our_writes_is_not_absorbed(self):
+    self.write_local("a.txt", "a")
+    self.sync()
+    self.sync()
+    self.write_local("c.txt", "c")
+    original = pdrive.plan_sync
+
+    def plan_then_someone_edits(*args, **kwargs):
+      self.write_remote("phone.txt", "from the phone")
+      return original(*args, **kwargs)
+
+    pdrive.plan_sync = plan_then_someone_edits
+    try:
+      self.sync()
+    finally:
+      pdrive.plan_sync = original
+    result = self.sync()
+    self.assertEqual(result["remoteScan"], "full")
+    self.assertEqual(self.read_local("phone.txt"), "from the phone")
+
+  def test_folded_delete_then_web_change_is_seen(self):
+    self.write_local("a.txt", "a")
+    self.write_local("b.txt", "b")
+    self.sync()
+    self.sync()
+    os.remove(os.path.join(self.local, "a.txt"))
+    self.sync()
+    self.assertEqual(self.sync()["remoteScan"], "cached")
+    self.write_remote("web.txt", "w")
     self.assertEqual(self.sync()["remoteScan"], "full")
+    self.assertEqual(sorted(self.local_files()), ["b.txt", "web.txt"])
 
   def test_local_delete_trashes_remote_with_cached_tree(self):
     self.write_local("a.txt", "a")

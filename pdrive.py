@@ -439,7 +439,7 @@ def cached_remote_tree(remote_root, patterns, event_id):
     or time.time() - cache["scannedAt"] > FULL_SCAN_SECONDS
   ):
     return None
-  return cache.get("files") or {}, set(cache.get("dirs") or [])
+  return cache.get("files") or {}, set(cache.get("dirs") or []), cache["scannedAt"]
 
 
 def save_remote_tree(remote_root, patterns, event_id, scanned_at, files, dirs):
@@ -734,7 +734,7 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
     event_id = None
   cached = cached_remote_tree(remote_root, patterns, event_id)
   if cached is not None:
-    remote, remote_dirs = cached
+    remote, remote_dirs, scanned_at = cached
     remote_skipped = []
     if not dry_run:
       set_progress("Drive unchanged since the last scan")
@@ -783,6 +783,15 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
 
   needs_remote = sorted(d for d in local_dirs - remote_dirs if not under(d, trashed_local))
   needs_local = sorted(d for d in remote_dirs - local_dirs if not under(d, trashed_remote))
+
+  # This sync's own writes move the Drive's event ID too. So that they do not
+  # force a full scan next time, check nobody else changed the Drive since
+  # the scan began, then fold exactly what we wrote into the saved tree.
+  writes_remote = bool(needs_remote or by_op.get("upload") or by_op.get("conflict") or by_op.get("trash-remote"))
+  try:
+    unchanged_before_writes = bool(writes_remote and event_id and drive_event_id(cli, remote_root) == event_id)
+  except SyncError:
+    unchanged_before_writes = False
   syncer.make_remote_dirs(needs_remote)
   for rel in needs_local:
     os.makedirs(syncer.local(rel), exist_ok=True)
@@ -863,9 +872,9 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
     new_state.pop(action["rel"], None)
 
   # Record the new remote revisions of everything we uploaded.
+  fresh = {}
   if uploaded:
     parents = sorted({rel_parent(rel) for rel in uploaded})
-    fresh = {}
 
     def relist(parent):
       return parent, syncer.cli.list(syncer.remote(parent))
@@ -895,6 +904,23 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
     "files": {rel: entry for rel, entry in new_state.items() if rel in final_local},
     "dirs": saved_dirs,
   })
+
+  # Only a clean run is folded in: any failure leaves what the Drive holds
+  # uncertain, and the stale event ID then forces a full scan.
+  if unchanged_before_writes and not syncer.errors and all(rel in fresh for rel in uploaded):
+    tree = dict(remote)
+    tree_dirs = set(remote_dirs) | set(needs_remote)
+    for rel in uploaded:
+      tree[rel] = fresh[rel]
+    for action in remote_trash:
+      gone = action["rel"]
+      tree = {rel: entry for rel, entry in tree.items() if not under(rel, [gone])}
+      tree_dirs = {d for d in tree_dirs if not under(d, [gone])}
+    try:
+      after_writes = drive_event_id(cli, remote_root)
+    except SyncError:
+      after_writes = None
+    save_remote_tree(remote_root, patterns, after_writes, scanned_at, tree, tree_dirs)
   return {"dryRun": False, "done": syncer.done, "errors": syncer.errors, "files": len(final_local), "remoteScan": remote_scan}
 
 
