@@ -66,6 +66,9 @@ TRANSIENT_ERRORS = re.compile(
   re.IGNORECASE,
 )
 RETRY_DELAYS = (2, 6, 15)
+# A Drive that has not changed since the last scan is not listed again (see
+# drive_event_id); a full listing still runs at least this often.
+FULL_SCAN_SECONDS = 6 * 3600
 
 
 class SyncError(Exception):
@@ -74,6 +77,14 @@ class SyncError(Exception):
 
 # ---------------------------------------------------------------------------
 # Paths and small utilities
+
+
+def cli_data_dir():
+  """Where the official CLI keeps events.json (its Drive event cursor)."""
+  base = os.environ.get("PDRIVE_CLI_DATA_DIR")
+  if base:
+    return Path(base)
+  return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "proton-drive-cli"
 
 
 def state_dir():
@@ -391,6 +402,57 @@ def scan_remote(cli, root, patterns=(), progress=None):
   return files, dirs, skipped
 
 
+def drive_event_id(cli, remote_root):
+  """The Drive's latest event ID, or None when it cannot be trusted.
+
+  Every CLI call first asks Proton for the volume's events since the ID it
+  stored in events.json and stores the newer one, so the ID moves whenever
+  anything on the Drive changes: this plugin's uploads, the web app, the phone.
+  One cheap call refreshes it; the file has to be written during that call,
+  or the check did not happen and the answer is None."""
+  started = time.time()
+  cli.info(remote_root)
+  path = cli_data_dir() / "events.json"
+  try:
+    if path.stat().st_mtime < started:
+      return None
+  except OSError:
+    return None
+  drive = (read_json(path, {}) or {}).get("drive") or {}
+  ids = sorted(f"{volume}:{entry.get('lastEventId')}" for volume, entry in drive.items()
+               if volume != "core" and isinstance(entry, dict) and entry.get("lastEventId"))
+  return "|".join(ids) or None
+
+
+def cached_remote_tree(remote_root, patterns, event_id):
+  """The remote tree from the last full scan, if the Drive has not changed
+  since that scan began and it is recent enough; otherwise None."""
+  if not event_id:
+    return None
+  cache = read_json(state_dir() / "remote-cache.json", {})
+  if (
+    cache.get("version") != 1
+    or cache.get("remote") != remote_root
+    or cache.get("ignore") != list(patterns)
+    or cache.get("eventId") != event_id
+    or not isinstance(cache.get("scannedAt"), (int, float))
+    or time.time() - cache["scannedAt"] > FULL_SCAN_SECONDS
+  ):
+    return None
+  return cache.get("files") or {}, set(cache.get("dirs") or [])
+
+
+def save_remote_tree(remote_root, patterns, event_id, scanned_at, files, dirs):
+  path = state_dir() / "remote-cache.json"
+  if not event_id:
+    path.unlink(missing_ok=True)
+    return
+  write_json(path, {
+    "version": 1, "remote": remote_root, "ignore": list(patterns), "eventId": event_id,
+    "scannedAt": scanned_at, "files": files, "dirs": sorted(dirs),
+  })
+
+
 # ---------------------------------------------------------------------------
 # Planning
 
@@ -664,7 +726,23 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
   local, local_dirs, local_skipped = scan_local(local_root, patterns)
   if not dry_run:
     set_progress("Scanning")
-  remote, remote_dirs, remote_skipped = scan_remote(cli, remote_root, patterns, None if dry_run else set_progress)
+  # The ID is read before the scan, so a change made while it runs (or by
+  # this sync's own uploads) leaves the cache stale and forces the next scan.
+  try:
+    event_id = None if first_run else drive_event_id(cli, remote_root)
+  except SyncError:
+    event_id = None
+  cached = cached_remote_tree(remote_root, patterns, event_id)
+  if cached is not None:
+    remote, remote_dirs = cached
+    remote_skipped = []
+    if not dry_run:
+      set_progress("Drive unchanged since the last scan")
+  else:
+    scanned_at = time.time()
+    remote, remote_dirs, remote_skipped = scan_remote(cli, remote_root, patterns, None if dry_run else set_progress)
+    save_remote_tree(remote_root, patterns, event_id, scanned_at, remote, remote_dirs)
+  remote_scan = "cached" if cached is not None else "full"
   for rel in local_skipped + remote_skipped:
     log("skipped", rel, "name cannot be represented on the other side")
 
@@ -687,7 +765,7 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
   for action in actions:
     summary[action["op"]] += 1
   if dry_run:
-    return {"dryRun": True, "plan": summary, "deletions": deletions, "actions": actions[:200]}
+    return {"dryRun": True, "plan": summary, "deletions": deletions, "actions": actions[:200], "remoteScan": remote_scan}
 
   syncer = Syncer(cli, local_root, remote_root, log)
   by_op = {}
@@ -817,7 +895,7 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
     "files": {rel: entry for rel, entry in new_state.items() if rel in final_local},
     "dirs": saved_dirs,
   })
-  return {"dryRun": False, "done": syncer.done, "errors": syncer.errors, "files": len(final_local)}
+  return {"dryRun": False, "done": syncer.done, "errors": syncer.errors, "files": len(final_local), "remoteScan": remote_scan}
 
 
 # When the running sync took the lock. The panel reads it from progress.json,

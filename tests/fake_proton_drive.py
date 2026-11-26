@@ -148,8 +148,29 @@ def main():
   save_meta(meta)
 
 
+def write_events():
+  """Like the real CLI, every call leaves the Drive's latest event ID in
+  events.json. Here the ID is a digest of the whole fake Drive, so it moves
+  on any change, including ones a test makes on disk directly."""
+  data_dir = os.environ.get("PDRIVE_CLI_DATA_DIR")
+  if not data_dir or os.environ.get("FAKE_NO_EVENTS"):
+    return
+  digest = hashlib.sha1()
+  for root, dirs, names in os.walk(os.path.join(ROOT, "my-files")):
+    dirs.sort()
+    for name in sorted(dirs + names):
+      st = os.stat(os.path.join(root, name))
+      digest.update(f"{os.path.relpath(os.path.join(root, name), ROOT)}|{st.st_size}|{st.st_mtime_ns}\n".encode())
+  os.makedirs(data_dir, exist_ok=True)
+  with open(os.path.join(data_dir, "events.json"), "w") as handle:
+    json.dump({"version": 1, "drive": {"core": {"lastEventId": "core"}, "VOLUME": {"lastEventId": digest.hexdigest()}}}, handle)
+
+
 if __name__ == "__main__":
   # The plugin runs several CLI processes at once; serialize them here.
   with open(os.path.join(ROOT, ".lock"), "w") as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
-    main()
+    try:
+      main()
+    finally:
+      write_events()

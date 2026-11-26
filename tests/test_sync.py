@@ -34,6 +34,7 @@ class SyncTest(unittest.TestCase):
       "PDRIVE_CLI": os.path.join(HERE, "fake_proton_drive.py"),
       "PDRIVE_STATE_DIR": os.path.join(self.tmp, "state"),
       "PDRIVE_LOCAL_TRASH": trash_script,
+      "PDRIVE_CLI_DATA_DIR": os.path.join(self.tmp, "cli-data"),
     }
     self.saved_env = {k: os.environ.get(k) for k in self.env}
     os.environ.update(self.env)
@@ -422,6 +423,77 @@ class SyncTest(unittest.TestCase):
       {"time": "2026-01-01T00:02:00Z", "kind": "synced", "path": "", "detail": "", "done": {"uploaded": 1}},
     ])
     self.assertEqual([row["kind"] for row in pdrive.read_activity(10)], ["synced", "uploaded"])
+
+  # remote scan skipping ------------------------------------------------------
+
+  def test_unchanged_drive_is_not_listed_again(self):
+    self.write_local("a.txt", "a")
+    self.write_remote("b.txt", "b")
+    self.assertEqual(self.sync()["remoteScan"], "full")
+    # The first sync uploaded a.txt, which moves the event ID: one more full scan.
+    self.assertEqual(self.sync()["remoteScan"], "full")
+    self.assertEqual(self.sync()["remoteScan"], "cached")
+    self.assertEqual(self.sync()["remoteScan"], "cached")
+
+  def test_remote_change_forces_a_full_scan(self):
+    self.write_local("a.txt", "a")
+    self.sync()
+    self.sync()
+    self.write_remote("new.txt", "from the web")
+    result = self.sync()
+    self.assertEqual(result["remoteScan"], "full")
+    self.assertEqual(self.read_local("new.txt"), "from the web")
+
+  def test_local_change_uploads_with_cached_tree(self):
+    self.write_local("a.txt", "a")
+    self.sync()
+    self.sync()
+    self.write_local("c.txt", "c")
+    result = self.sync()
+    self.assertEqual(result["remoteScan"], "cached")
+    self.assertEqual(self.read_remote("c.txt"), "c")
+    self.assertEqual(self.sync()["remoteScan"], "full")
+
+  def test_local_delete_trashes_remote_with_cached_tree(self):
+    self.write_local("a.txt", "a")
+    self.write_local("b.txt", "b")
+    self.sync()
+    self.sync()
+    os.remove(os.path.join(self.local, "a.txt"))
+    self.assertEqual(self.sync()["remoteScan"], "cached")
+    self.assertNotIn("a.txt", self.remote_files())
+
+  def test_old_cache_forces_a_full_scan(self):
+    self.write_local("a.txt", "a")
+    self.sync()
+    self.sync()
+    cache_path = pdrive.state_dir() / "remote-cache.json"
+    cache = json.load(open(cache_path))
+    cache["scannedAt"] -= pdrive.FULL_SCAN_SECONDS + 1
+    json.dump(cache, open(cache_path, "w"))
+    self.assertEqual(self.sync()["remoteScan"], "full")
+
+  def test_stale_events_file_forces_a_full_scan(self):
+    self.write_local("a.txt", "a")
+    self.sync()
+    self.sync()
+    # A CLI call that did not refresh events.json (an older or failing CLI)
+    # proves nothing about the Drive.
+    events = os.path.join(self.tmp, "cli-data", "events.json")
+    aged = os.path.getmtime(events) - 60
+    os.utime(events, (aged, aged))
+    os.environ["FAKE_NO_EVENTS"] = "1"
+    try:
+      self.assertEqual(self.sync()["remoteScan"], "full")
+    finally:
+      os.environ.pop("FAKE_NO_EVENTS")
+
+  def test_changing_the_ignore_list_forces_a_full_scan(self):
+    self.write_local("a.txt", "a")
+    self.sync()
+    self.sync()
+    result = pdrive.run_sync(self.local, REMOTE, ignore="build")
+    self.assertEqual(result["remoteScan"], "full")
 
   def test_syncs_whole_of_my_files(self):
     self.write_local("top.txt", "top")

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A sync skips listing Proton Drive when nothing there has changed since the
+  last scan. One cheap CLI call refreshes the Drive's event ID (every change,
+  from any device, moves it); if it matches the ID saved when the last scan
+  began, that scan's tree is reused. A full listing still runs at least every
+  6 hours, and whenever the ID cannot be confirmed.
 - Sync settings in the panel: choose the local folder with the desktop's
   folder picker, browse Proton Drive for the remote folder, manage skipped
   names as removable chips (pick files or folders, or type a name), and set the
