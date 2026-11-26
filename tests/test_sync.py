@@ -406,9 +406,32 @@ class SyncTest(unittest.TestCase):
     self.assertNotIn("b.txt", self.remote_files())
     self.assertFalse((pdrive.state_dir() / "progress.json").exists())
 
-  def test_refuses_whole_drive(self):
+  def test_idle_syncs_do_not_stack_in_activity(self):
+    idle = {"kind": "synced", "path": "", "detail": "", "done": {"uploaded": 0, "downloaded": 0}}
+    pdrive.append_activity([dict(idle, time="2026-01-01T00:00:00Z")])
+    pdrive.append_activity([{"time": "2026-01-01T00:01:00Z", "kind": "uploaded", "path": "a.txt", "detail": ""}])
+    for minute in (2, 3, 4):
+      pdrive.append_activity([dict(idle, time=f"2026-01-01T00:0{minute}:00Z")])
+    lines = (pdrive.state_dir() / "activity.jsonl").read_text().splitlines()
+    self.assertEqual([json.loads(line)["time"][-6:-1] for line in lines], ["00:00", "01:00", "04:00"])
+
+  def test_activity_hides_errors_a_later_sync_got_past(self):
+    pdrive.append_activity([
+      {"time": "2026-01-01T00:00:00Z", "kind": "error", "path": "", "detail": "offline"},
+      {"time": "2026-01-01T00:01:00Z", "kind": "uploaded", "path": "a.txt", "detail": ""},
+      {"time": "2026-01-01T00:02:00Z", "kind": "synced", "path": "", "detail": "", "done": {"uploaded": 1}},
+    ])
+    self.assertEqual([row["kind"] for row in pdrive.read_activity(10)], ["synced", "uploaded"])
+
+  def test_syncs_whole_of_my_files(self):
+    self.write_local("top.txt", "top")
+    pdrive.run_sync(self.local, "/my-files")
+    with open(os.path.join(self.drive, "my-files", "top.txt")) as handle:
+      self.assertEqual(handle.read(), "top")
+
+  def test_refuses_remote_outside_my_files(self):
     with self.assertRaises(pdrive.SyncError):
-      pdrive.run_sync(self.local, "/my-files")
+      pdrive.run_sync(self.local, "/shared")
 
 
 if __name__ == "__main__":

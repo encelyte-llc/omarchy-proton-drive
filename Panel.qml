@@ -20,6 +20,19 @@ Panel {
   property int rowIndex: 0
   property bool cursorActive: false
   property double nowMs: Date.now()
+  // The settings view replaces the actions and activity while open.
+  property bool settingsOpen: false
+  property string settingsError: ""
+  // "form" or "remote" (the Proton Drive folder browser).
+  property string settingsView: "form"
+  // Set while the panel steps aside for the file chooser.
+  property bool resumeSettings: false
+  property string draftLocal: ""
+  property string draftRemote: ""
+  property var draftIgnore: []
+  property string remotePath: "/my-files"
+  property var remoteFolders: []
+  property string remoteError: ""
 
   readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
   readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
@@ -47,6 +60,7 @@ Panel {
     ]
     if (massDeleteBlocked) list.push({ key: "syncDeletes", glyph: "󰩹", title: "Sync and allow deletions", detail: "Moves the deleted files to the Trash" })
     list.push({ key: "folder", glyph: "󰉋", title: "Open sync folder", detail: drive.localFolder.replace(drive.home, "~") + "  ⇄  " + Model.remoteLabel(drive.remoteFolder) })
+    list.push({ key: "settings", glyph: "󰒓", title: "Sync settings", detail: "Folders, skipped files, every " + drive.syncIntervalMin + " min" })
     list.push({ key: "web", glyph: "󰖟", title: "Open Proton Drive", detail: "drive.proton.me" })
     list.push({ key: "logout", glyph: "󰍃", title: "Sign out", detail: drive.status.account || "" })
     return list
@@ -63,8 +77,140 @@ Panel {
       case "sync": drive.syncNow(false); break
       case "syncDeletes": drive.syncNow(true); break
       case "folder": drive.openLocalFolder(); break
+      case "settings": openSettings(); break
       case "web": drive.openDriveWeb(); break
       case "logout": drive.logout(); break
+    }
+  }
+
+  function openSettings() {
+    draftLocal = drive.localFolder
+    draftRemote = drive.remoteFolder
+    draftIgnore = String(drive.ignore).split(",").map(function(s) { return s.trim() }).filter(function(s) { return s !== "" })
+    intervalField.value = drive.syncIntervalMin
+    settingsError = ""
+    settingsView = "form"
+    settingsOpen = true
+    if (panelFlick) panelFlick.contentY = 0
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
+  function closeSettings() {
+    if (settingsView === "remote") { settingsView = "form"; return }
+    settingsOpen = false
+    settingsError = ""
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
+  function saveSettings() {
+    if (saveProcess.running || settingsView !== "form") return
+    if (draftLocal === "") { settingsError = "Choose a folder on this computer."; return }
+    settingsError = ""
+    // Values travel as arguments, never inside the script text.
+    saveProcess.command = ["bash", "-c",
+      'set -e; id=$1; omarchy-bar set "$id" localFolder "$2"; omarchy-bar set "$id" remoteFolder "$3"; ' +
+      'omarchy-bar set "$id" ignore "$4"; omarchy-bar set "$id" syncIntervalMin "$5" --json',
+      "save", root.moduleName, draftLocal.replace(drive.home, "~"), Model.normalizeRemote(draftRemote),
+      draftIgnore.join(", "), String(intervalField.value)]
+    saveProcess.running = true
+  }
+
+  // --- Pickers ---------------------------------------------------------------
+  // The desktop file chooser is a normal window, and this panel sits above
+  // every window and holds the keyboard, so the panel steps aside while the
+  // chooser is open and comes back with the draft untouched.
+  function pick(target) {
+    if (pickProcess.running) return
+    pickProcess.target = target
+    var start = target === "local" ? draftLocal.substring(0, draftLocal.lastIndexOf("/")) : draftLocal
+    var command = ["python3", drive.helperPath, "pick", "--start", start, "--title",
+      target === "local" ? "Folder to keep in sync" : (target === "ignoreFolder" ? "Folders to skip" : "Files to skip")]
+    if (target !== "ignoreFile") command.push("--folder")
+    if (target !== "local") command.push("--multiple")
+    pickProcess.command = command
+    resumeSettings = true
+    root.close()
+    pickProcess.running = true
+  }
+
+  function applyPick(paths) {
+    if (!paths.length) return
+    if (pickProcess.target === "local") { draftLocal = paths[0]; return }
+    var next = draftIgnore.slice()
+    for (var i = 0; i < paths.length; i++) {
+      var name = String(paths[i]).replace(/\/+$/, "").split("/").pop()
+      if (name !== "" && next.indexOf(name) < 0) next.push(name)
+    }
+    draftIgnore = next
+  }
+
+  function removeIgnore(name) {
+    draftIgnore = draftIgnore.filter(function(n) { return n !== name })
+  }
+
+  function addIgnoreText() {
+    var name = ignoreAddField.text.trim()
+    if (name !== "" && draftIgnore.indexOf(name) < 0) draftIgnore = draftIgnore.concat([name])
+    ignoreAddField.text = ""
+  }
+
+  Process {
+    id: pickProcess
+    property string target: ""
+    stdout: StdioCollector { id: pickOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      var result = Model.parseJson(pickOut.text) || {}
+      if (exitCode !== 0 || result.ok === false) root.settingsError = result.error || "The file chooser did not open"
+      else root.applyPick(result.paths || [])
+      root.open()
+      root.settingsOpen = true
+      root.resumeSettings = false
+    }
+  }
+
+  // --- Proton Drive folder browser -------------------------------------------
+  readonly property string remoteRoot: "/my-files"
+
+  function browseRemote(path) {
+    if (listProcess.running) return
+    remotePath = path
+    remoteFolders = []
+    remoteError = ""
+    settingsView = "remote"
+    listProcess.command = ["python3", drive.helperPath, "list-remote", path]
+    listProcess.running = true
+  }
+
+  function remoteUp() {
+    if (remotePath === remoteRoot) return
+    browseRemote(remotePath.substring(0, remotePath.lastIndexOf("/")) || remoteRoot)
+  }
+
+  function chooseRemote() {
+    draftRemote = remotePath
+    settingsView = "form"
+  }
+
+  Process {
+    id: listProcess
+    stdout: StdioCollector { id: listOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      var result = Model.parseJson(listOut.text) || {}
+      if (exitCode !== 0 || !result.ok) root.remoteError = result.error || "Could not read this Proton Drive folder"
+      else root.remoteFolders = result.folders || []
+    }
+  }
+
+  Process {
+    id: saveProcess
+    stderr: StdioCollector { id: saveErrors }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.settingsError = "Could not save: " + (String(saveErrors.text).trim() || "exit " + exitCode)
+        return
+      }
+      root.closeSettings()
+      drive.flash("Settings saved")
     }
   }
 
@@ -122,6 +268,7 @@ Panel {
   implicitHeight: button.implicitHeight
 
   onOpenedChanged: if (opened) {
+    if (!resumeSettings) settingsOpen = false
     cursorActive = false
     focusSection = "rows"
     rowIndex = 0
@@ -144,6 +291,7 @@ Panel {
     function toggle(): void { root.toggle() }
     function refresh(): string { drive.refresh(); return "ok" }
     function sync(): string { drive.syncNow(false); return "ok" }
+    function settings(): void { root.open(); Qt.callLater(root.openSettings) }
     function status(): string { return drive.phase }
   }
 
@@ -183,13 +331,25 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       onMoveRequested: function(dx, dy) {
+        if (root.settingsOpen) return
         if (!root.cursorActive) { root.cursorActive = true; return }
         root.moveCursor(dx, dy)
       }
-      onActivateRequested: if (root.cursorActive) root.activateCursor()
-      onCloseRequested: root.close()
-      onTabRequested: function(direction) { root.switchPanel(direction) }
+      onActivateRequested: {
+        if (root.settingsOpen) root.saveSettings()
+        else if (root.cursorActive) root.activateCursor()
+      }
+      onCloseRequested: root.settingsOpen ? root.closeSettings() : root.close()
+      onTabRequested: function(direction) {
+        if (!root.settingsOpen) { root.switchPanel(direction); return }
+        if (root.settingsView !== "form") return
+        var fields = [ignoreAddField, intervalField.field]
+        var at = -1
+        for (var i = 0; i < fields.length; i++) if (fields[i].activeFocus) at = i
+        fields[(at + direction + fields.length) % fields.length].forceActiveFocus()
+      }
       onTextKey: function(t) {
+        if (root.settingsOpen) return
         var key = String(t).toLowerCase()
         if (key === "s") drive.syncNow(false)
         else if (key === "r") drive.refresh()
@@ -269,7 +429,7 @@ Panel {
           }
 
           Column {
-            visible: drive.authenticated
+            visible: drive.authenticated && !root.settingsOpen
             width: parent.width
             spacing: Style.spacing.labelGap
 
@@ -283,12 +443,13 @@ Panel {
           }
 
           PanelSeparator {
-            visible: drive.authenticated
+            visible: drive.authenticated && !root.settingsOpen
             foreground: root.foreground
           }
 
           Column {
             id: actionColumn
+            visible: !root.settingsOpen
             width: parent.width
             spacing: Style.space(6)
 
@@ -305,12 +466,12 @@ Panel {
           }
 
           PanelSeparator {
-            visible: root.activityRows.length > 0
+            visible: root.activityRows.length > 0 && !root.settingsOpen
             foreground: root.foreground
           }
 
           Column {
-            visible: root.activityRows.length > 0
+            visible: root.activityRows.length > 0 && !root.settingsOpen
             width: parent.width
             spacing: Style.space(10)
 
@@ -361,8 +522,374 @@ Panel {
               }
             }
           }
+
+          PanelSeparator {
+            visible: root.settingsOpen
+            foreground: root.foreground
+          }
+
+          Column {
+            id: settingsColumn
+            visible: root.settingsOpen && root.settingsView === "form"
+            width: parent.width
+            spacing: Style.space(12)
+
+            SectionHeading { text: "SYNC SETTINGS"; linkText: "Back"; onLinkClicked: root.closeSettings() }
+
+            SettingField {
+              label: "Folder on this computer"
+              PickRow {
+                width: parent.width
+                glyph: "󰉋"
+                title: root.draftLocal.replace(drive.home, "~")
+                detail: "Click to choose another folder"
+                onClicked: root.pick("local")
+              }
+            }
+
+            SettingField {
+              label: "Folder in Proton Drive"
+              PickRow {
+                width: parent.width
+                glyph: "󰅟"
+                title: Model.remoteLabel(root.draftRemote)
+                detail: "Click to browse your Proton Drive"
+                onClicked: root.browseRemote(root.draftRemote)
+              }
+            }
+
+            SettingField {
+              label: "Skip these files and folders"
+
+              Column {
+                width: parent.width
+                spacing: Style.space(8)
+
+                Flow {
+                  width: parent.width
+                  spacing: Style.space(6)
+
+                  Repeater {
+                    model: root.draftIgnore
+                    Chip {
+                      required property string modelData
+                      label: modelData
+                      onRemove: root.removeIgnore(modelData)
+                    }
+                  }
+
+                  Text {
+                    visible: root.draftIgnore.length === 0
+                    textFormat: Text.PlainText
+                    text: "Nothing skipped"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                RowLayout {
+                  width: parent.width
+                  spacing: Style.space(6)
+
+                  TextField {
+                    id: ignoreAddField
+                    Layout.fillWidth: true
+                    foreground: root.foreground
+                    font.family: root.fontFamily
+                    placeholderText: "Type a name, Enter"
+                    onAccepted: root.addIgnoreText()
+                  }
+                  Button {
+                    text: "Folders…"
+                    bordered: true
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    onClicked: root.pick("ignoreFolder")
+                  }
+                  Button {
+                    text: "Files…"
+                    bordered: true
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    onClicked: root.pick("ignoreFile")
+                  }
+                }
+              }
+            }
+
+            NumberField {
+              id: intervalField
+              label: "Sync every (minutes)"
+              from: 2
+              to: 1440
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: root.settingsError !== "" ? root.settingsError
+                : "Skipping works by name: everything called that, anywhere in the folder. Changing a folder starts a fresh sync that merges both sides; nothing gets deleted."
+              color: root.settingsError !== "" ? root.urgent : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Row {
+              spacing: Style.space(8)
+
+              Button {
+                text: saveProcess.running ? "Saving…" : "Save"
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.saveSettings()
+              }
+              Button {
+                text: "Cancel"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.closeSettings()
+              }
+            }
+          }
+
+          Column {
+            id: remoteColumn
+            visible: root.settingsOpen && root.settingsView === "remote"
+            width: parent.width
+            spacing: Style.space(8)
+
+            SectionHeading { text: "PROTON DRIVE FOLDER"; linkText: "Back"; onLinkClicked: root.closeSettings() }
+
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: Model.remoteLabel(root.remotePath)
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              elide: Text.ElideLeft
+            }
+
+            PickRow {
+              visible: root.remotePath !== root.remoteRoot
+              width: parent.width
+              glyph: "󰁝"
+              title: "Up one level"
+              onClicked: root.remoteUp()
+            }
+
+            Repeater {
+              model: root.remoteFolders
+              PickRow {
+                required property string modelData
+                width: remoteColumn.width
+                glyph: "󰉋"
+                title: modelData
+                onClicked: root.browseRemote(root.remotePath + "/" + modelData)
+              }
+            }
+
+            Text {
+              visible: listProcess.running || root.remoteError !== "" || root.remoteFolders.length === 0
+              textFormat: Text.PlainText
+              width: parent.width
+              text: listProcess.running ? "Loading folders…"
+                : root.remoteError !== "" ? root.remoteError : "No folders inside this one"
+              color: root.remoteError !== "" && !listProcess.running ? root.urgent : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Row {
+              spacing: Style.space(8)
+              topPadding: Style.space(4)
+
+              Button {
+                text: "Use " + (root.remotePath === root.remoteRoot ? "My files" : root.remotePath.split("/").pop())
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.chooseRemote()
+              }
+              Button {
+                text: "Cancel"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.closeSettings()
+              }
+            }
+          }
         }
       }
+    }
+  }
+
+  component SectionHeading: RowLayout {
+    id: heading
+    property string text: ""
+    property string linkText: ""
+    signal linkClicked()
+    width: parent ? parent.width : 0
+
+    PanelSectionHeader {
+      text: heading.text
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+      Layout.fillWidth: true
+    }
+
+    Text {
+      textFormat: Text.PlainText
+      text: heading.linkText
+      color: linkArea.containsMouse ? root.foreground : root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      Layout.alignment: Qt.AlignVCenter
+
+      MouseArea {
+        id: linkArea
+        anchors.fill: parent
+        anchors.margins: -Style.space(4)
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onClicked: heading.linkClicked()
+      }
+    }
+  }
+
+  // A clickable row: a glyph, a title and an optional hint, like the panel's
+  // action rows but driven by its own hover.
+  component PickRow: CursorSurface {
+    id: pickRow
+    property string glyph: ""
+    property string title: ""
+    property string detail: ""
+    signal clicked()
+
+    hasCursor: pickArea.containsMouse
+    foreground: root.foreground
+    implicitHeight: pickContent.implicitHeight + Style.spacing.rowPaddingX
+
+    MouseArea {
+      id: pickArea
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: pickRow.clicked()
+    }
+
+    RowLayout {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.space(10)
+
+      Text {
+        textFormat: Text.PlainText
+        text: pickRow.glyph
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.icon
+        horizontalAlignment: Text.AlignHCenter
+        Layout.preferredWidth: root.glyphSlot
+        Layout.alignment: Qt.AlignVCenter
+      }
+
+      ColumnLayout {
+        id: pickContent
+        Layout.fillWidth: true
+        spacing: Style.space(1)
+
+        Text {
+          textFormat: Text.PlainText
+          Layout.fillWidth: true
+          text: pickRow.title
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          elide: Text.ElideMiddle
+        }
+        Text {
+          textFormat: Text.PlainText
+          visible: text !== ""
+          Layout.fillWidth: true
+          text: pickRow.detail
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+    }
+  }
+
+  component Chip: Rectangle {
+    id: chip
+    property string label: ""
+    signal remove()
+
+    implicitWidth: chipRow.implicitWidth + Style.space(16)
+    implicitHeight: chipRow.implicitHeight + Style.space(8)
+    radius: height / 2
+    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, removeArea.containsMouse ? 0.16 : 0.08)
+
+    Row {
+      id: chipRow
+      anchors.centerIn: parent
+      spacing: Style.space(6)
+
+      Text {
+        textFormat: Text.PlainText
+        text: chip.label
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+      Text {
+        textFormat: Text.PlainText
+        text: "✕"
+        color: removeArea.containsMouse ? root.urgent : root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+    }
+
+    MouseArea {
+      id: removeArea
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: chip.remove()
+    }
+  }
+
+  component SettingField: Column {
+    property string label: ""
+    default property alias content: fieldSlot.data
+
+    width: settingsColumn.width
+    spacing: Style.space(4)
+
+    Text {
+      textFormat: Text.PlainText
+      text: parent.label
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+    }
+
+    Item {
+      id: fieldSlot
+      width: parent.width
+      implicitHeight: childrenRect.height
     }
   }
 

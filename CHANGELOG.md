@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Sync settings in the panel: choose the local folder with the desktop's
+  folder picker, browse Proton Drive for the remote folder, manage skipped
+  names as removable chips (pick files or folders, or type a name), and set the
+  sync interval. Saved through `omarchy-bar set`, so no hand-editing of
+  `shell.json`. Also reachable over IPC (`settings`).
+- Recent activity keeps one "all up to date" line instead of one per idle
+  sync, and hides errors that a later successful sync got past.
+- The remote folder can be the whole of My files.
+- Local paths with `[`, `*`, `?` or `{` upload: the CLI globs its arguments,
+  so they are escaped.
 - Ignore setting: leave folders out of the sync by name (`node_modules`) or by
   path (`site/assets`), with wildcards. Defaults to common build and cache folders.
   Newly ignored folders are never treated as deleted.

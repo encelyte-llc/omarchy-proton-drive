@@ -12,6 +12,9 @@ only ever parses JSON.
   pdrive.py sync --local DIR --remote PATH [--dry-run] [--allow-mass-delete]
   pdrive.py activity [--limit N]        recent sync activity
   pdrive.py clear-activity              empty the recent activity list
+  pdrive.py list-remote PATH            the folders directly inside a Drive folder
+  pdrive.py pick [--folder] [--multiple] [--start DIR] [--title T]
+                                        the desktop's file chooser; prints the chosen paths
 
 Safety rules of the sync, in order of importance:
   * nothing is ever deleted permanently: deletions go to the local desktop
@@ -134,6 +137,13 @@ def normalize_remote(path):
 def escape_name(name):
   # Remote paths are POSIX paths; a slash inside a node name is escaped.
   return name.replace("/", "\\/")
+
+
+def glob_escape(local_path):
+  # The CLI expands local upload arguments as globs, even for a name that exists
+  # literally: "H[16279511].pdf" matches nothing and the whole batch fails. A
+  # one-character class is the escape it honors (backslashes are not).
+  return re.sub(r"[\[*?{}]", lambda match: "[" + match.group(0) + "]", local_path)
 
 
 def remote_join(root, rel):
@@ -277,7 +287,8 @@ class Cli:
 
   def upload(self, local_paths, parent):
     self.run(
-      ["filesystem", "upload", "-f", "create-new-revision", "-d", "merge"] + list(local_paths) + [parent],
+      ["filesystem", "upload", "-f", "create-new-revision", "-d", "merge"]
+      + [glob_escape(path) for path in local_paths] + [parent],
       json_output=False,
     )
 
@@ -623,8 +634,8 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
   remote_root = normalize_remote(remote_root)
   if not remote_root.startswith("/my-files/") and remote_root != "/my-files":
     raise SyncError("The remote folder must be inside /my-files")
-  if remote_root == "/my-files":
-    raise SyncError("Pick a folder inside My files; syncing the whole Drive is not supported")
+  # Syncing the whole of My files is allowed, so loose files at the top of
+  # the Drive sync too.
 
   state_file = sdir / "state.json"
   saved = read_json(state_file, {})
@@ -839,6 +850,17 @@ def read_progress():
   }
 
 
+def parse_line(line):
+  try:
+    return json.loads(line)
+  except ValueError:
+    return {}
+
+
+def is_idle_sync(entry):
+  return entry.get("kind") == "synced" and not any((entry.get("done") or {}).values())
+
+
 def append_activity(entries):
   if not entries:
     return
@@ -846,7 +868,12 @@ def append_activity(entries):
   lines = []
   if path.exists():
     lines = path.read_text(encoding="utf-8").splitlines()
-  lines.extend(json.dumps(entry) for entry in entries)
+  for entry in entries:
+    # A sync that changed nothing replaces the previous one instead of
+    # stacking up: the list keeps one "all up to date" line with a fresh time.
+    if lines and is_idle_sync(entry) and is_idle_sync(parse_line(lines[-1])):
+      lines.pop()
+    lines.append(json.dumps(entry))
   path.write_text("\n".join(lines[-ACTIVITY_LIMIT:]) + "\n", encoding="utf-8")
 
 
@@ -854,12 +881,13 @@ def read_activity(limit):
   path = state_dir() / "activity.jsonl"
   if not path.exists():
     return []
-  rows = []
-  for line in path.read_text(encoding="utf-8").splitlines()[-limit * 3:]:
-    try:
-      rows.append(json.loads(line))
-    except ValueError:
-      continue
+  rows = [row for row in map(parse_line, path.read_text(encoding="utf-8").splitlines()) if row]
+  # Each sync ends with a marker ("Sync complete" or "Sync failed"). Only the
+  # newest one is current state; older ones, and errors a later sync got past,
+  # are just noise. File changes are kept.
+  markers = [r for r in rows if r.get("path", "") == "" and r.get("kind") in ("synced", "error")]
+  latest = max(markers, key=lambda r: r.get("time", ""), default=None)
+  rows = [r for r in rows if r is latest or r not in markers]
   order = {id(r): i for i, r in enumerate(rows)}
   rows = [r for r in rows if r.get("kind") != "skipped"] + [r for r in rows if r.get("kind") == "skipped"][-3:]
   # Newest first; entries written in the same second keep their file order.
@@ -1044,6 +1072,66 @@ def command_clear_activity(args):
   emit({"ok": True})
 
 
+def command_list_remote(args):
+  path = "/" + args.path.strip().strip("/") if args.path.strip("/") else "/"
+  try:
+    entries = Cli(cli_path()).list(path)
+  except SyncError as error:
+    emit({"ok": False, "path": path, "error": str(error)}, 1)
+  names = sorted(
+    ((entry.get("name") or {}).get("value") or "" for entry in entries if entry.get("type") == "folder"),
+    key=str.lower,
+  )
+  emit({"ok": True, "path": path, "folders": [name for name in names if name]})
+
+
+def command_pick(args):
+  """Opens the desktop file chooser through the XDG portal, the same dialog
+  every app uses, and waits for the answer."""
+  import urllib.parse
+  import gi
+  gi.require_version("Gio", "2.0")
+  from gi.repository import Gio, GLib
+
+  bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+  token = f"pdrive{os.getpid()}"
+  sender = bus.get_unique_name().lstrip(":").replace(".", "_")
+  handle = f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
+  loop = GLib.MainLoop()
+  answer = {}
+
+  def on_response(_conn, _sender, _path, _iface, _signal, params):
+    code, results = params.unpack()
+    answer["code"] = code
+    answer["uris"] = results.get("uris") or []
+    loop.quit()
+
+  bus.signal_subscribe("org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request", "Response",
+                       handle, None, Gio.DBusSignalFlags.NONE, on_response)
+  options = {
+    "handle_token": GLib.Variant("s", token),
+    "directory": GLib.Variant("b", args.folder),
+    "multiple": GLib.Variant("b", args.multiple),
+    "modal": GLib.Variant("b", True),
+  }
+  start = os.path.expanduser(args.start or "")
+  if start and os.path.isdir(start):
+    options["current_folder"] = GLib.Variant("ay", os.fsencode(start) + b"\0")
+  try:
+    bus.call_sync("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                  "org.freedesktop.portal.FileChooser", "OpenFile",
+                  GLib.Variant("(ssa{sv})", ("", args.title, options)),
+                  GLib.VariantType("(o)"), Gio.DBusCallFlags.NONE, -1, None)
+  except GLib.Error as error:
+    emit({"ok": False, "error": f"Could not open the file chooser: {error.message}"}, 1)
+  loop.run()
+  # Response code 0 is a choice, 1 a cancel, 2 a failure.
+  if answer.get("code") == 2:
+    emit({"ok": False, "error": "The file chooser failed"}, 1)
+  paths = [urllib.parse.unquote(urllib.parse.urlparse(uri).path) for uri in answer.get("uris", []) if uri.startswith("file://")]
+  emit({"ok": True, "paths": paths})
+
+
 def main():
   parser = argparse.ArgumentParser(prog="pdrive.py")
   sub = parser.add_subparsers(dest="command", required=True)
@@ -1068,6 +1156,15 @@ def main():
   activity.set_defaults(func=command_activity)
   clear = sub.add_parser("clear-activity")
   clear.set_defaults(func=command_clear_activity)
+  list_remote = sub.add_parser("list-remote")
+  list_remote.add_argument("path")
+  list_remote.set_defaults(func=command_list_remote)
+  pick = sub.add_parser("pick")
+  pick.add_argument("--folder", action="store_true")
+  pick.add_argument("--multiple", action="store_true")
+  pick.add_argument("--start", default="")
+  pick.add_argument("--title", default="Choose")
+  pick.set_defaults(func=command_pick)
   args = parser.parse_args()
   args.func(args)
 
