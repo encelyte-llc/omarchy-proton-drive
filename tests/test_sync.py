@@ -38,6 +38,7 @@ class SyncTest(unittest.TestCase):
     }
     self.saved_env = {k: os.environ.get(k) for k in self.env}
     pdrive.EVENT_SETTLE_SECONDS = 0
+    pdrive.PROBE_RETRY_SECONDS = 0
     os.environ.update(self.env)
 
   def tearDown(self):

@@ -73,6 +73,8 @@ FULL_SCAN_SECONDS = 6 * 3600
 # writing, the event ID is re-read until it has moved and holds still for
 # this long, so the saved ID includes our writes (see settled_event_id).
 EVENT_SETTLE_SECONDS = 3
+PROBE_ATTEMPTS = 5
+PROBE_RETRY_SECONDS = 2
 EVENT_SETTLE_TIMEOUT = 30
 
 
@@ -416,9 +418,12 @@ def drive_event_id(cli, remote_root):
   One cheap call refreshes it; the file has to be written during that call,
   or the check did not happen and the answer is None."""
   path = cli_data_dir() / "events.json"
-  # The CLI skips the write when another of its processes holds the file's
-  # lock (the panel's status refresh, a parallel listing), so try twice.
-  for attempt in range(2):
+  # The CLI skips the write while another of its processes holds the file's
+  # lock (the panel's status refresh, a parallel listing). That is brief, so
+  # try a few times before giving up.
+  for attempt in range(PROBE_ATTEMPTS):
+    if attempt:
+      time.sleep(PROBE_RETRY_SECONDS)
     started = time.time()
     cli.info(remote_root)
     try:
