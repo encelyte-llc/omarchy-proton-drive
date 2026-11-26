@@ -901,7 +901,10 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
     "version": STATE_VERSION,
     "local": local_root,
     "remote": remote_root,
-    "files": {rel: entry for rel, entry in new_state.items() if rel in final_local},
+    # A file that was here when the sync began but is gone now was deleted
+    # during the sync: keep its entry, so the next sync sees a local delete
+    # and trashes the Drive copy instead of downloading it back.
+    "files": {rel: entry for rel, entry in new_state.items() if rel in final_local or rel in local},
     "dirs": saved_dirs,
   })
 

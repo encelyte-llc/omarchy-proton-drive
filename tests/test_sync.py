@@ -530,6 +530,28 @@ class SyncTest(unittest.TestCase):
     result = pdrive.run_sync(self.local, REMOTE, ignore="build")
     self.assertEqual(result["remoteScan"], "full")
 
+  def test_delete_during_a_sync_is_not_undone(self):
+    self.write_local("a.txt", "a")
+    self.write_local("b.txt", "b")
+    self.sync()
+    self.write_local("c.txt", "c")
+    original = pdrive.plan_sync
+
+    def plan_then_user_deletes(*args, **kwargs):
+      actions = original(*args, **kwargs)
+      os.remove(os.path.join(self.local, "a.txt"))
+      return actions
+
+    pdrive.plan_sync = plan_then_user_deletes
+    try:
+      self.sync()
+    finally:
+      pdrive.plan_sync = original
+    result = self.sync()
+    self.assertEqual(result["done"]["downloaded"], 0)
+    self.assertNotIn("a.txt", self.local_files())
+    self.assertNotIn("a.txt", self.remote_files())
+
   def test_syncs_whole_of_my_files(self):
     self.write_local("top.txt", "top")
     pdrive.run_sync(self.local, "/my-files")
