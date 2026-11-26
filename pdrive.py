@@ -69,6 +69,11 @@ RETRY_DELAYS = (2, 6, 15)
 # A Drive that has not changed since the last scan is not listed again (see
 # drive_event_id); a full listing still runs at least this often.
 FULL_SCAN_SECONDS = 6 * 3600
+# Proton records our own writes as Drive events a moment later. After
+# writing, the event ID is re-read until it has moved and holds still for
+# this long, so the saved ID includes our writes (see settled_event_id).
+EVENT_SETTLE_SECONDS = 3
+EVENT_SETTLE_TIMEOUT = 30
 
 
 class SyncError(Exception):
@@ -422,6 +427,21 @@ def drive_event_id(cli, remote_root):
   ids = sorted(f"{volume}:{entry.get('lastEventId')}" for volume, entry in drive.items()
                if volume != "core" and isinstance(entry, dict) and entry.get("lastEventId"))
   return "|".join(ids) or None
+
+
+def settled_event_id(cli, remote_root, before):
+  """The event ID once our writes have shown up: it differs from `before`
+  and two reads EVENT_SETTLE_SECONDS apart agree. None if it does not
+  settle in time, which leaves the next sync to list the Drive in full."""
+  deadline = time.monotonic() + EVENT_SETTLE_TIMEOUT
+  last = None
+  while time.monotonic() < deadline:
+    current = drive_event_id(cli, remote_root)
+    if current and current != before and current == last:
+      return current
+    last = current
+    time.sleep(EVENT_SETTLE_SECONDS)
+  return None
 
 
 def cached_remote_tree(remote_root, patterns, event_id):
@@ -920,7 +940,7 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
       tree = {rel: entry for rel, entry in tree.items() if not under(rel, [gone])}
       tree_dirs = {d for d in tree_dirs if not under(d, [gone])}
     try:
-      after_writes = drive_event_id(cli, remote_root)
+      after_writes = settled_event_id(cli, remote_root, event_id)
     except SyncError:
       after_writes = None
     save_remote_tree(remote_root, patterns, after_writes, scanned_at, tree, tree_dirs)

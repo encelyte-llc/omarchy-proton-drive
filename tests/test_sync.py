@@ -37,6 +37,7 @@ class SyncTest(unittest.TestCase):
       "PDRIVE_CLI_DATA_DIR": os.path.join(self.tmp, "cli-data"),
     }
     self.saved_env = {k: os.environ.get(k) for k in self.env}
+    pdrive.EVENT_SETTLE_SECONDS = 0
     os.environ.update(self.env)
 
   def tearDown(self):
@@ -551,6 +552,30 @@ class SyncTest(unittest.TestCase):
     self.assertEqual(result["done"]["downloaded"], 0)
     self.assertNotIn("a.txt", self.local_files())
     self.assertNotIn("a.txt", self.remote_files())
+
+  def test_fold_waits_for_our_own_events(self):
+    self.write_local("a.txt", "a")
+    self.sync()
+    self.sync()
+    events = os.path.join(self.tmp, "cli-data", "events.json")
+    stale = "VOLUME:" + json.load(open(events))["drive"]["VOLUME"]["lastEventId"]
+    # Reads 1-2 come before our writes; read 3, right after them, still shows
+    # the old ID, as Proton does for a moment.
+    original = pdrive.drive_event_id
+    reads = {"n": 0}
+
+    def lagging(cli, root):
+      reads["n"] += 1
+      value = original(cli, root)
+      return stale if reads["n"] <= 3 else value
+
+    self.write_local("c.txt", "c")
+    pdrive.drive_event_id = lagging
+    try:
+      self.sync()
+    finally:
+      pdrive.drive_event_id = original
+    self.assertEqual(self.sync()["remoteScan"], "cached")
 
   def test_syncs_whole_of_my_files(self):
     self.write_local("top.txt", "top")
