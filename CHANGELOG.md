@@ -9,8 +9,6 @@
   `shell.json`. Also reachable over IPC (`settings`).
 - Recent activity keeps one "all up to date" line instead of one per idle
   sync, and hides errors that a later successful sync got past.
-- The panel scrolls a fixed 120px per mouse-wheel notch instead of Qt's few
-  text lines.
 - The remote folder can be the whole of My files.
 - Local paths with `[`, `*`, `?` or `{` upload: the CLI globs its arguments,
   so they are escaped.

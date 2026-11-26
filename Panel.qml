@@ -368,18 +368,6 @@ Panel {
         interactive: contentHeight > height
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-        // Qt's default wheel step is a few text lines, far less than a
-        // browser's. Move a fixed 120px per notch; touchpads keep their own
-        // pixel deltas.
-        WheelHandler {
-          onWheel: function(event) {
-            var dy = event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y / 120 * Style.space(120)
-            var bottom = Math.max(0, panelFlick.contentHeight - panelFlick.height)
-            panelFlick.contentY = Math.max(0, Math.min(bottom, panelFlick.contentY - dy))
-            event.accepted = true
-          }
-        }
-
         Column {
           id: column
           width: panelFlick.width
