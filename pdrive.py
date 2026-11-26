@@ -66,6 +66,16 @@ TRANSIENT_ERRORS = re.compile(
   re.IGNORECASE,
 )
 RETRY_DELAYS = (2, 6, 15)
+# A Drive that has not changed since the last scan is not listed again (see
+# drive_event_id); a full listing still runs at least this often.
+FULL_SCAN_SECONDS = 6 * 3600
+# Proton records our own writes as Drive events a moment later. After
+# writing, the event ID is re-read until it has moved and holds still for
+# this long, so the saved ID includes our writes (see settled_event_id).
+EVENT_SETTLE_SECONDS = 3
+PROBE_ATTEMPTS = 5
+PROBE_RETRY_SECONDS = 2
+EVENT_SETTLE_TIMEOUT = 30
 
 
 class SyncError(Exception):
@@ -74,6 +84,14 @@ class SyncError(Exception):
 
 # ---------------------------------------------------------------------------
 # Paths and small utilities
+
+
+def cli_data_dir():
+  """Where the official CLI keeps events.json (its Drive event cursor)."""
+  base = os.environ.get("PDRIVE_CLI_DATA_DIR")
+  if base:
+    return Path(base)
+  return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "proton-drive-cli"
 
 
 def state_dir():
@@ -391,6 +409,96 @@ def scan_remote(cli, root, patterns=(), progress=None):
   return files, dirs, skipped
 
 
+def drive_event_id(cli, remote_root):
+  """The Drive's latest event ID, or None when it cannot be trusted.
+
+  Every CLI call first asks Proton for the volume's events since the ID it
+  stored in events.json and stores the newer one, so the ID moves whenever
+  anything on the Drive changes: this plugin's uploads, the web app, the phone.
+  One cheap call refreshes it; the file has to be written during that call,
+  or the check did not happen and the answer is None."""
+  path = cli_data_dir() / "events.json"
+  # The CLI skips the write while another of its processes holds the file's
+  # lock (the panel's status refresh, a parallel listing). That is brief, so
+  # try a few times before giving up.
+  for attempt in range(PROBE_ATTEMPTS):
+    if attempt:
+      time.sleep(PROBE_RETRY_SECONDS)
+    started = time.time()
+    cli.info(remote_root)
+    try:
+      if path.stat().st_mtime >= started:
+        break
+    except OSError:
+      return None
+  else:
+    return None
+  drive = (read_json(path, {}) or {}).get("drive") or {}
+  ids = sorted(f"{volume}:{entry.get('lastEventId')}" for volume, entry in drive.items()
+               if volume != "core" and isinstance(entry, dict) and entry.get("lastEventId"))
+  return "|".join(ids) or None
+
+
+def settled_event_id(cli, remote_root, before):
+  """The event ID once our writes have shown up: it differs from `before`
+  and two reads EVENT_SETTLE_SECONDS apart agree. None if it does not
+  settle in time, which leaves the next sync to list the Drive in full."""
+  deadline = time.monotonic() + EVENT_SETTLE_TIMEOUT
+  last = None
+  while time.monotonic() < deadline:
+    current = drive_event_id(cli, remote_root)
+    if current and current != before and current == last:
+      return current
+    last = current
+    time.sleep(EVENT_SETTLE_SECONDS)
+  return None
+
+
+def cached_remote_tree(remote_root, patterns, event_id):
+  """The remote tree from the last full scan, if the Drive has not changed
+  since that scan began and it is recent enough; otherwise None."""
+  if not event_id:
+    return None
+  cache = read_json(state_dir() / "remote-cache.json", {})
+  if (
+    cache.get("version") != 1
+    or cache.get("remote") != remote_root
+    or cache.get("ignore") != list(patterns)
+    or cache.get("eventId") != event_id
+    or not isinstance(cache.get("scannedAt"), (int, float))
+    or time.time() - cache["scannedAt"] > FULL_SCAN_SECONDS
+  ):
+    return None
+  return cache.get("files") or {}, set(cache.get("dirs") or []), cache["scannedAt"]
+
+
+def cache_miss_reason(remote_root, patterns, event_id, first_run):
+  """Why the saved tree could not be used, for the sync result and log."""
+  if first_run:
+    return "first sync"
+  if not event_id:
+    return "could not confirm the Drive's latest change"
+  cache = read_json(state_dir() / "remote-cache.json", {})
+  if not cache:
+    return "no saved tree"
+  if cache.get("remote") != remote_root or cache.get("ignore") != list(patterns):
+    return "folder or skip list changed"
+  if cache.get("eventId") != event_id:
+    return "the Drive changed"
+  return "saved tree older than 6 hours"
+
+
+def save_remote_tree(remote_root, patterns, event_id, scanned_at, files, dirs):
+  path = state_dir() / "remote-cache.json"
+  if not event_id:
+    path.unlink(missing_ok=True)
+    return
+  write_json(path, {
+    "version": 1, "remote": remote_root, "ignore": list(patterns), "eventId": event_id,
+    "scannedAt": scanned_at, "files": files, "dirs": sorted(dirs),
+  })
+
+
 # ---------------------------------------------------------------------------
 # Planning
 
@@ -664,7 +772,24 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
   local, local_dirs, local_skipped = scan_local(local_root, patterns)
   if not dry_run:
     set_progress("Scanning")
-  remote, remote_dirs, remote_skipped = scan_remote(cli, remote_root, patterns, None if dry_run else set_progress)
+  # The ID is read before the scan, so a change made while it runs (or by
+  # this sync's own uploads) leaves the cache stale and forces the next scan.
+  try:
+    event_id = None if first_run else drive_event_id(cli, remote_root)
+  except SyncError:
+    event_id = None
+  cached = cached_remote_tree(remote_root, patterns, event_id)
+  scan_reason = cache_miss_reason(remote_root, patterns, event_id, first_run) if cached is None else ""
+  if cached is not None:
+    remote, remote_dirs, scanned_at = cached
+    remote_skipped = []
+    if not dry_run:
+      set_progress("Drive unchanged since the last scan")
+  else:
+    scanned_at = time.time()
+    remote, remote_dirs, remote_skipped = scan_remote(cli, remote_root, patterns, None if dry_run else set_progress)
+    save_remote_tree(remote_root, patterns, event_id, scanned_at, remote, remote_dirs)
+  remote_scan = "cached" if cached is not None else "full"
   for rel in local_skipped + remote_skipped:
     log("skipped", rel, "name cannot be represented on the other side")
 
@@ -687,7 +812,7 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
   for action in actions:
     summary[action["op"]] += 1
   if dry_run:
-    return {"dryRun": True, "plan": summary, "deletions": deletions, "actions": actions[:200]}
+    return {"dryRun": True, "plan": summary, "deletions": deletions, "actions": actions[:200], "remoteScan": remote_scan, "scanReason": scan_reason}
 
   syncer = Syncer(cli, local_root, remote_root, log)
   by_op = {}
@@ -705,6 +830,15 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
 
   needs_remote = sorted(d for d in local_dirs - remote_dirs if not under(d, trashed_local))
   needs_local = sorted(d for d in remote_dirs - local_dirs if not under(d, trashed_remote))
+
+  # This sync's own writes move the Drive's event ID too. So that they do not
+  # force a full scan next time, check nobody else changed the Drive since
+  # the scan began, then fold exactly what we wrote into the saved tree.
+  writes_remote = bool(needs_remote or by_op.get("upload") or by_op.get("conflict") or by_op.get("trash-remote"))
+  try:
+    unchanged_before_writes = bool(writes_remote and event_id and drive_event_id(cli, remote_root) == event_id)
+  except SyncError:
+    unchanged_before_writes = False
   syncer.make_remote_dirs(needs_remote)
   for rel in needs_local:
     os.makedirs(syncer.local(rel), exist_ok=True)
@@ -735,6 +869,9 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
       syncer.done["uploaded"] += 1
       log("uploaded", rel)
 
+  # A file deleted since the scan is not an upload error: the next sync
+  # sees it gone and, if the Drive has it, trashes it there.
+  upload_rels = [rel for rel in upload_rels if os.path.lexists(syncer.local(rel))]
   uploaded = syncer.upload(upload_rels, uploaded_batch) if upload_rels else []
 
   download_rels = [a["rel"] for a in by_op.get("download", [])]
@@ -785,9 +922,9 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
     new_state.pop(action["rel"], None)
 
   # Record the new remote revisions of everything we uploaded.
+  fresh = {}
   if uploaded:
     parents = sorted({rel_parent(rel) for rel in uploaded})
-    fresh = {}
 
     def relist(parent):
       return parent, syncer.cli.list(syncer.remote(parent))
@@ -814,10 +951,30 @@ def _run_sync(local_root, remote_root, dry_run, allow_mass_delete, patterns):
     "version": STATE_VERSION,
     "local": local_root,
     "remote": remote_root,
-    "files": {rel: entry for rel, entry in new_state.items() if rel in final_local},
+    # A file that was here when the sync began but is gone now was deleted
+    # during the sync: keep its entry, so the next sync sees a local delete
+    # and trashes the Drive copy instead of downloading it back.
+    "files": {rel: entry for rel, entry in new_state.items() if rel in final_local or rel in local},
     "dirs": saved_dirs,
   })
-  return {"dryRun": False, "done": syncer.done, "errors": syncer.errors, "files": len(final_local)}
+
+  # Only a clean run is folded in: any failure leaves what the Drive holds
+  # uncertain, and the stale event ID then forces a full scan.
+  if unchanged_before_writes and not syncer.errors and all(rel in fresh for rel in uploaded):
+    tree = dict(remote)
+    tree_dirs = set(remote_dirs) | set(needs_remote)
+    for rel in uploaded:
+      tree[rel] = fresh[rel]
+    for action in remote_trash:
+      gone = action["rel"]
+      tree = {rel: entry for rel, entry in tree.items() if not under(rel, [gone])}
+      tree_dirs = {d for d in tree_dirs if not under(d, [gone])}
+    try:
+      after_writes = settled_event_id(cli, remote_root, event_id)
+    except SyncError:
+      after_writes = None
+    save_remote_tree(remote_root, patterns, after_writes, scanned_at, tree, tree_dirs)
+  return {"dryRun": False, "done": syncer.done, "errors": syncer.errors, "files": len(final_local), "remoteScan": remote_scan, "scanReason": scan_reason}
 
 
 # When the running sync took the lock. The panel reads it from progress.json,
